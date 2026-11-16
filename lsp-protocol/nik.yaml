@@ -1,0 +1,29 @@
+schemaVersion: 1
+
+package:
+  name: nikrun-lsp-protocol
+  version: 0.1.0
+  description: Standalone Language Server Protocol (LSP 3.17) and JSON-RPC 2.0 library for Free Pascal
+  license: MIT
+  repository: https://github.com/nikrun/cli
+
+  build:
+    mode: objfpc
+    longStrings: true
+    modeSwitches:
+      - advancedrecords
+    unitPaths:
+      - src
+
+  test:
+    entry: tests/lsp_protocol_tests.pas
+    output: bin/lsp_protocol_tests
+    build:
+      unitPaths:
+        - tests
+      assertions: true
+      heaptrc: true
+      checks:
+        - range
+        - overflow
+        - io

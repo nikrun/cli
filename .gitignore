@@ -1,0 +1,28 @@
+# Build, test & staging directories
+dist/
+.work/
+.nikrun/
+bin/
+.cache/
+lsp-protocol/bin/
+lsp-protocol/.cache/
+
+# FPC build artifacts
+*.ppu
+*.o
+*.a
+*.or
+*.res
+*.compiled
+*.exe
+*.dbg
+ppas.bat
+ppas.sh
+link.res
+fpcdebug.txt
+
+# OS & Editor files
+.DS_Store
+Thumbs.db
+*.bak
+*~

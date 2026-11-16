@@ -1,0 +1,24 @@
+# Build & cache directories
+bin/
+.cache/
+.nik/
+
+# Free Pascal build artifacts
+*.ppu
+*.o
+*.a
+*.or
+*.res
+*.compiled
+*.exe
+*.dbg
+ppas.bat
+ppas.sh
+link.res
+fpcdebug.txt
+
+# OS & editor files
+.DS_Store
+Thumbs.db
+*.bak
+*~
