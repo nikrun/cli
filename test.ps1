@@ -939,55 +939,116 @@ end.
             $psi.CreateNoWindow = $true
 
             $proc = [System.Diagnostics.Process]::Start($psi)
-            $memOut = New-Object System.IO.MemoryStream
-            $copyOutTask = $proc.StandardOutput.BaseStream.CopyToAsync($memOut)
             $stderrTask = $proc.StandardError.ReadToEndAsync()
+
+            $accum = [System.Collections.Generic.List[byte]]::new()
+            $parsedFrames = [System.Collections.Generic.List[object]]::new()
+            $readBuf = New-Object byte[] 8192
+            $state = @{
+                ParsePos    = 0
+                PendingRead = $proc.StandardOutput.BaseStream.ReadAsync($readBuf, 0, $readBuf.Length)
+            }
+
+            $pumpOutput = {
+                param([int]$WaitMs)
+                while ($null -ne $state.PendingRead) {
+                    if (-not $state.PendingRead.Wait($WaitMs)) {
+                        break
+                    }
+                    $n = $state.PendingRead.Result
+                    if ($n -le 0) {
+                        $state.PendingRead = $null
+                    } else {
+                        for ($k = 0; $k -lt $n; $k++) {
+                            $accum.Add($readBuf[$k])
+                        }
+                        $state.PendingRead = $proc.StandardOutput.BaseStream.ReadAsync($readBuf, 0, $readBuf.Length)
+                    }
+
+                    while ($state.ParsePos -lt $accum.Count) {
+                        $sep = -1
+                        for ($i = $state.ParsePos; $i -le ($accum.Count - 4); $i++) {
+                            if ($accum[$i] -eq 13 -and $accum[$i + 1] -eq 10 -and $accum[$i + 2] -eq 13 -and $accum[$i + 3] -eq 10) {
+                                $sep = $i
+                                break
+                            }
+                        }
+                        if ($sep -lt 0) { break }
+                        $hdrBytes = $accum.GetRange($state.ParsePos, $sep - $state.ParsePos).ToArray()
+                        $hdr = [System.Text.Encoding]::ASCII.GetString($hdrBytes)
+                        if ($hdr -notmatch 'Content-Length:\s*(\d+)') {
+                            throw "Invalid LSP frame header: $hdr"
+                        }
+                        $len = [int]$Matches[1]
+                        $bodyStart = $sep + 4
+                        if (($bodyStart + $len) -gt $accum.Count) { break }
+                        $bodyBytes = $accum.GetRange($bodyStart, $len).ToArray()
+                        $jsonBody = [System.Text.Encoding]::UTF8.GetString($bodyBytes)
+                        $parsedFrames.Add(($jsonBody | ConvertFrom-Json))
+                        $state.ParsePos = $bodyStart + $len
+                    }
+                    # Drain any immediately buffered bytes without blocking again
+                    $WaitMs = 0
+                }
+            }
 
             foreach ($m in $Messages) {
                 if ($m -is [hashtable] -and $m.ContainsKey('__sleepMs')) {
                     $proc.StandardInput.BaseStream.Flush()
-                    Start-Sleep -Milliseconds ([int]$m['__sleepMs'])
+                    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+                    $targetMs = [int]$m['__sleepMs']
+                    while ($sw.ElapsedMilliseconds -lt $targetMs) {
+                        $rem = [Math]::Max(1, [int]($targetMs - $sw.ElapsedMilliseconds))
+                        & $pumpOutput ([Math]::Min(25, $rem))
+                    }
+                } elseif ($m -is [hashtable] -and $m.ContainsKey('__waitDiagCount')) {
+                    $proc.StandardInput.BaseStream.Flush()
+                    $waitCfg   = $m['__waitDiagCount']
+                    $targetUri = [string]$waitCfg['uri']
+                    $minCount  = [int]$waitCfg['count']
+                    $timeoutMs = if ($waitCfg.ContainsKey('timeoutMs')) { [int]$waitCfg['timeoutMs'] } else { 15000 }
+                    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+                    while ($sw.ElapsedMilliseconds -lt $timeoutMs) {
+                        $matched = @($parsedFrames | Where-Object {
+                            $_.PSObject.Properties['method'] -and
+                            $_.method -eq 'textDocument/publishDiagnostics' -and
+                            $_.params.uri -eq $targetUri
+                        }).Count
+                        if ($matched -ge $minCount) {
+                            break
+                        }
+                        if ($proc.HasExited -and $null -eq $state.PendingRead) {
+                            break
+                        }
+                        & $pumpOutput 50
+                    }
                 } else {
                     $frm = Format-LspFrame $m
                     $proc.StandardInput.BaseStream.Write($frm, 0, $frm.Length)
+                    & $pumpOutput 0
                 }
             }
+
             $proc.StandardInput.BaseStream.Flush()
             $proc.StandardInput.Close()
 
-            $exited = $proc.WaitForExit(20000)
-            $copyOutTask.Wait(5000) | Out-Null
+            $exitSw = [System.Diagnostics.Stopwatch]::StartNew()
+            while ((-not $proc.HasExited) -and ($exitSw.ElapsedMilliseconds -lt 20000)) {
+                & $pumpOutput 50
+            }
+            $exited = $proc.WaitForExit(1000)
+
+            $drainSw = [System.Diagnostics.Stopwatch]::StartNew()
+            while (($null -ne $state.PendingRead) -and ($drainSw.ElapsedMilliseconds -lt 5000)) {
+                & $pumpOutput 50
+            }
             $stderrTask.Wait(5000) | Out-Null
             $stderrText = $stderrTask.Result
-            $outBytes = $memOut.ToArray()
-            $memOut.Dispose()
-
-            $frames = @()
-            $pos = 0
-            while ($pos -lt $outBytes.Length) {
-                $sep = -1
-                for ($i = $pos; $i -le ($outBytes.Length - 4); $i++) {
-                    if ($outBytes[$i] -eq 13 -and $outBytes[$i + 1] -eq 10 -and $outBytes[$i + 2] -eq 13 -and $outBytes[$i + 3] -eq 10) {
-                        $sep = $i
-                        break
-                    }
-                }
-                if ($sep -lt 0) { break }
-                $hdr = [System.Text.Encoding]::ASCII.GetString($outBytes, $pos, $sep - $pos)
-                if ($hdr -notmatch 'Content-Length:\s*(\d+)') {
-                    throw "Invalid LSP frame header: $hdr"
-                }
-                $len = [int]$Matches[1]
-                $start = $sep + 4
-                $jsonBody = [System.Text.Encoding]::UTF8.GetString($outBytes, $start, $len)
-                $frames += ($jsonBody | ConvertFrom-Json)
-                $pos = $start + $len
-            }
 
             return [PSCustomObject]@{
                 Exited   = $exited
                 ExitCode = $proc.ExitCode
-                Frames   = $frames
+                Frames   = $parsedFrames.ToArray()
                 Stderr   = $stderrText
             }
         }
@@ -1088,6 +1149,7 @@ end.
             @{ jsonrpc = '2.0'; id = 1; method = 'initialize'; params = @{ processId = $PID; rootUri = $brokenRoot; clientInfo = @{ name = 'nik-e2e'; version = '1.0' } } },
             @{ jsonrpc = '2.0'; method = 'initialized'; params = @{} },
             @{ jsonrpc = '2.0'; method = 'textDocument/didOpen'; params = @{ textDocument = @{ uri = $brokenUri; languageId = 'objectpascal'; version = 1; text = $brokenText } } },
+            @{ __waitDiagCount = @{ uri = $brokenUri; count = 1 } },
             @{ jsonrpc = '2.0'; id = 2; method = 'shutdown' },
             @{ jsonrpc = '2.0'; method = 'exit' }
         )
@@ -1193,20 +1255,20 @@ end.
             @{ jsonrpc = '2.0'; id = 40; method = 'initialize'; params = @{ processId = $PID; rootUri = $appRootUri } },
             @{ jsonrpc = '2.0'; method = 'initialized'; params = @{} },
             @{ jsonrpc = '2.0'; method = 'textDocument/didOpen'; params = @{ textDocument = @{ uri = $appEncodedUri; languageId = 'objectpascal'; version = 1; text = $appMainText } } },
-            @{ __sleepMs = 450 },
+            @{ __waitDiagCount = @{ uri = $appEncodedUri; count = 1 } },
             # Rapid unsaved typing burst (should coalesce via 250ms debounce and report BrokenUnsavedIdent on exact %3A URI)
             @{ jsonrpc = '2.0'; method = 'textDocument/didChange'; params = @{ textDocument = @{ uri = $appEncodedUri; version = 2 }; contentChanges = @( @{ text = $brokenInMemoryApp } ) } },
             @{ jsonrpc = '2.0'; method = 'textDocument/didChange'; params = @{ textDocument = @{ uri = $appEncodedUri; version = 3 }; contentChanges = @( @{ text = $brokenInMemoryApp } ) } },
-            @{ __sleepMs = 650 },
+            @{ __waitDiagCount = @{ uri = $appEncodedUri; count = 2 } },
             # Fix unsaved buffer in memory without saving to disk -> diagnostics must clear to []
             @{ jsonrpc = '2.0'; method = 'textDocument/didChange'; params = @{ textDocument = @{ uri = $appEncodedUri; version = 4 }; contentChanges = @( @{ text = $appMainText } ) } },
-            @{ __sleepMs = 650 },
+            @{ __waitDiagCount = @{ uri = $appEncodedUri; count = 3 } },
             # Open imported GreeterUnit.pas and rename BuildGreeting in memory (unsaved) -> AppMain.pas must detect broken call site
             @{ jsonrpc = '2.0'; method = 'textDocument/didOpen'; params = @{ textDocument = @{ uri = $greeterRawUri; languageId = 'objectpascal'; version = 1; text = $brokenInMemoryGreeter } } },
-            @{ __sleepMs = 700 },
+            @{ __waitDiagCount = @{ uri = $appEncodedUri; count = 4 } },
             # Close GreeterUnit.pas without saving -> reverts overlay to disk file and clears AppMain.pas error automatically
             @{ jsonrpc = '2.0'; method = 'textDocument/didClose'; params = @{ textDocument = @{ uri = $greeterRawUri } } },
-            @{ __sleepMs = 700 },
+            @{ __waitDiagCount = @{ uri = $appEncodedUri; count = 5 } },
             @{ jsonrpc = '2.0'; id = 41; method = 'shutdown' },
             @{ jsonrpc = '2.0'; method = 'exit' }
         )
