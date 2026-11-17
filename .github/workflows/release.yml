@@ -1,0 +1,191 @@
+name: Build and Test and Publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: 'Release Channel'
+        required: true
+        type: choice
+        default: 'insider'
+        options:
+          - stable
+          - insider
+      increment:
+        description: 'Increment Version Number (Stable only)'
+        required: true
+        type: choice
+        default: 'none'
+        options:
+          - none
+          - patch
+          - minor
+          - major
+  schedule:
+    - cron: '47 23 * * *' # 23:47 UTC = 01:47 CEST / 00:47 CET
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  check-activity:
+    name: Check Recent Commits & Resolve Version
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.check.outputs.should_run }}
+      channel: ${{ steps.check.outputs.channel }}
+      clean_version: ${{ steps.check.outputs.clean_version }}
+      version_tag: ${{ steps.check.outputs.version_tag }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Check for New Commits Since Last Insider Release
+        id: check
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.NIKRUN_PAT || github.token }}
+        run: |
+          set -euo pipefail
+          CHANNEL="${{ github.event_name == 'schedule' && 'insider' || github.event.inputs.channel }}"
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+
+          if [ ! -f version.txt ]; then
+            echo "Error: version.txt not found!"
+            exit 1
+          fi
+          CLEAN_VERSION=$(tr -d 'v\n\r ' < version.txt)
+          BUILD="${GITHUB_RUN_NUMBER}"
+          VERSION_TAG="v${CLEAN_VERSION}-build.${BUILD}-channel.${CHANNEL}"
+          echo "clean_version=$CLEAN_VERSION" >> "$GITHUB_OUTPUT"
+          echo "version_tag=$VERSION_TAG" >> "$GITHUB_OUTPUT"
+
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "$CHANNEL" = "insider" ]; then
+            echo "Automated scheduled run for Insider channel detected. Checking last Insider release in ${{ github.repository }}..."
+            LAST_RELEASE_DATE=$(gh release list --repo "${{ github.repository }}" --limit 50 --json tagName,publishedAt,isPrerelease --jq '[.[] | select(.isPrerelease == true)][0].publishedAt' 2>/dev/null || true)
+
+            if [ -n "$LAST_RELEASE_DATE" ] && [ "$LAST_RELEASE_DATE" != "null" ]; then
+              echo "Last Insider release published at: $LAST_RELEASE_DATE"
+              NEW_COMMITS=$(git log -1 --since="$LAST_RELEASE_DATE" --format=%H)
+              if [ -z "$NEW_COMMITS" ]; then
+                echo "No new commits since last Insider release. Skipping scheduled build."
+                echo "should_run=false" >> "$GITHUB_OUTPUT"
+              else
+                echo "New commit found ($NEW_COMMITS) since last release. Proceeding with build."
+                echo "should_run=true" >> "$GITHUB_OUTPUT"
+              fi
+            else
+              echo "No previous Insider release found. Proceeding with build."
+              echo "should_run=true" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "Manual trigger or non-scheduled build (event=${{ github.event_name }}, channel=$CHANNEL). Proceeding with build."
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Build & Test CLI (${{ matrix.target_cpu }}-${{ matrix.target_os }})
+    needs: check-activity
+    if: github.ref == 'refs/heads/main' && needs.check-activity.outputs.should_run == 'true'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target_os: win64
+            target_cpu: x86_64
+            runner: windows-latest
+          - target_os: win64
+            target_cpu: aarch64
+            runner: windows-11-arm
+          - target_os: linux
+            target_cpu: x86_64
+            runner: ubuntu-24.04
+          - target_os: linux
+            target_cpu: aarch64
+            runner: ubuntu-24.04-arm
+          - target_os: darwin
+            target_cpu: x86_64
+            runner: macos-15-intel
+          - target_os: darwin
+            target_cpu: aarch64
+            runner: macos-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v7
+
+      - name: Run Build Action
+        uses: ./.github/actions/build
+        with:
+          clean-version: ${{ needs.check-activity.outputs.clean_version }}
+          version-tag: ${{ needs.check-activity.outputs.version_tag }}
+          channel: ${{ needs.check-activity.outputs.channel }}
+          target-os: ${{ matrix.target_os }}
+          target-cpu: ${{ matrix.target_cpu }}
+          github-token: ${{ secrets.NIKRUN_PAT || github.token }}
+
+  release:
+    name: Publish CLI Release
+    needs:
+      - check-activity
+      - build
+    if: github.ref == 'refs/heads/main' && needs.check-activity.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    env:
+      CHANNEL: ${{ needs.check-activity.outputs.channel }}
+      CLEAN_VERSION: ${{ needs.check-activity.outputs.clean_version }}
+      VERSION_TAG: ${{ needs.check-activity.outputs.version_tag }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          token: ${{ secrets.NIKRUN_PAT || github.token }}
+
+      - name: Download All Platform Artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          pattern: nik-*
+          merge-multiple: true
+
+      - name: Assemble Unified Release Manifest & Release Notes
+        shell: pwsh
+        run: |
+          ./build.ps1 -OutDir artifacts -Version "$env:VERSION_TAG" -ManifestOnly
+
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.NIKRUN_PAT || github.token }}
+        run: |
+          set -euo pipefail
+          PRERELEASE_FLAG=""
+          if [ "$CHANNEL" != "stable" ]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+
+          gh release delete "${VERSION_TAG}" --repo "${{ github.repository }}" --yes 2>/dev/null || true
+
+          NOTES_ARGS=(--notes "Automatically generated release.")
+          if [ -f .work/release-notes.md ]; then
+            NOTES_ARGS=(--notes-file .work/release-notes.md)
+          fi
+
+          gh release create "${VERSION_TAG}" \
+            --repo "${{ github.repository }}" \
+            --title "nik ${VERSION_TAG}" \
+            "${NOTES_ARGS[@]}" \
+            $PRERELEASE_FLAG \
+            ./artifacts/*
+
+      - name: Auto-Increment Version
+        uses: ./build-lib/github-actions/bump-version
+        with:
+          channel: ${{ env.CHANNEL }}
+          increment: ${{ github.event.inputs.increment || 'none' }}
+          github-token: ${{ secrets.NIKRUN_PAT || github.token }}

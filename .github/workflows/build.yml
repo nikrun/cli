@@ -1,0 +1,52 @@
+name: Build and Test
+
+on:
+  push:
+    branches: [ main, dev, 'feature/**' ]
+  pull_request:
+    branches: [ main, dev ]
+  workflow_dispatch:
+
+concurrency:
+  group: build-cli-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build & Test CLI (${{ matrix.target_cpu }}-${{ matrix.target_os }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target_os: win64
+            target_cpu: x86_64
+            runner: windows-latest
+          - target_os: win64
+            target_cpu: aarch64
+            runner: windows-11-arm
+          - target_os: linux
+            target_cpu: x86_64
+            runner: ubuntu-24.04
+          - target_os: linux
+            target_cpu: aarch64
+            runner: ubuntu-24.04-arm
+          - target_os: darwin
+            target_cpu: x86_64
+            runner: macos-15-intel
+          - target_os: darwin
+            target_cpu: aarch64
+            runner: macos-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v7
+
+      - name: Run Build and Test Action
+        uses: ./.github/actions/build
+        with:
+          target-os: ${{ matrix.target_os }}
+          target-cpu: ${{ matrix.target_cpu }}
+          github-token: ${{ secrets.NIKRUN_PAT || github.token }}

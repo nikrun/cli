@@ -8,7 +8,11 @@ uses
   SysUtils;
 
 const
+  {$IFDEF NIK_HAS_BUILD_VERSION}
+  {$I nik_build_version.inc}
+  {$ELSE}
   NIK_VERSION           = '0.1.0';
+  {$ENDIF}
   NIK_SCHEMA_VERSION    = 1;
   DEFAULT_SDK_INDEX_URL = 'https://github.com/nikrun/sdk/releases/download/latest/index.json';
   ENV_NIKRUN_HOME       = 'NIKRUN_HOME';

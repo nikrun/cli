@@ -1,0 +1,15 @@
+changelog:
+  - version: 0.1.0
+    changes:
+      added:
+        - 'Initial release of the `nik` CLI and standalone `nikrun-lsp-protocol` library'
+        - 'Add `nik sdk` commands (`list`, `install`, `info`, `uninstall`) with SHA-256 verification and `--json` output'
+        - 'Add `nik init` project scaffolder (`--program`, `--lib`, `--pkg`) with `~/.nikrun/template.yaml` blueprint support'
+        - 'Add `nik build` declarative compiler orchestrator over `nik.yaml` (`targets`, `profiles`, structured `--json` diagnostics)'
+        - 'Add `nik lsp` built-in Free Pascal Language Server (LSP 3.17) with live unsaved buffer overlays, diagnostics, symbols, Go to Definition, Hover, Signature Help, and Completion'
+      changed: []
+      deprecated: []
+      fixed: []
+      removed: []
+      security:
+        - 'Harden Windows process startup against working-directory DLL hijacking (`SetDefaultDllDirectories`)'

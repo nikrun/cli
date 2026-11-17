@@ -39,16 +39,19 @@ Before designing new CLI subcommands, flags, manifests, or architectural changes
 Run commands from the repository root (`pwsh` / Windows PowerShell):
 
 ```powershell
-# Build the nik CLI (debug profile with DWARF info & runtime checks -> bin/nik[.exe])
+# Full build, test & package pipeline (outputs ZIP, release-notes.json & manifest.json to .out/)
 .\build.ps1
 
-# Build optimized release binary
-.\build.ps1 -Profile release
+# Fast local compile only (skips test suites) -> bin/nik[.exe]
+.\build.ps1 -Profile debug -RunTests:$false
 
-# Run the automated CLI & LSP end-to-end test suite
+# Build optimized release binary & install into ~/.nikrun/bin
+.\build.ps1 -Profile release -Install -RunTests:$false
+
+# Run the automated CLI & LSP end-to-end test suite directly
 .\test.ps1
 
-# CI flow: provision newest Nikrun FPC SDK from nikrun/sdk, then build & stage release artifact in dist/cli/
+# CI flow: provision newest Nikrun FPC SDK from nikrun/sdk, then build, test & package release artifacts
 .\prepare.ps1
-.\build.ps1 -Profile release -Clean -StageDist
+.\build.ps1 -OutDir artifacts -Version "v0.1.0-build.1-channel.insider" -Profile release -Clean -RunTests
 ```

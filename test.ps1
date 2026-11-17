@@ -36,7 +36,7 @@ $IsWin    = if (Get-Variable -Name IsWindows -ErrorAction SilentlyContinue) {
 if (-not [string]::IsNullOrWhiteSpace($NikBinaryPath)) {
     $NikExe = [System.IO.Path]::GetFullPath($NikBinaryPath)
 } elseif (-not $SkipBuild) {
-    $NikExe = & (Join-Path $CliRoot 'build.ps1') -Profile debug
+    $NikExe = & (Join-Path $CliRoot 'build.ps1') -Profile debug -RunTests:$false -GenerateSpecs:$false
 } else {
     $ExeExt = if ($IsWin) { '.exe' } else { '' }
     $NikExe = [System.IO.Path]::Combine($CliRoot, 'bin', "nik$ExeExt")
@@ -340,8 +340,9 @@ try {
     Write-Host "`n==> Running nik CLI & SDK command tests..." -ForegroundColor Cyan
 
     # 1. Version & Help
+    $expectedCleanVer = [regex]::Escape(((Get-Content -Path (Join-Path $CliRoot 'version.txt') -Raw).Trim() -replace '^v', ''))
     $ver = Invoke-Nik -NikHome $TestHome -Arguments @('--version')
-    Assert-True ($ver.Output -match '^nik 0\.1\.0') 'nik --version prints CLI version'
+    Assert-True ($ver.Output -match "^nik v?$expectedCleanVer\b") 'nik --version prints CLI version'
 
     $help = Invoke-Nik -NikHome $TestHome -Arguments @('--help')
     Assert-True ($help.Output -match 'COMMANDS:' -and $help.Output -match 'init' -and $help.Output -match 'sdk') 'nik --help lists init and sdk commands'

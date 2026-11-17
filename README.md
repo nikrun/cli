@@ -1,6 +1,6 @@
 # Nikrun — `nik` CLI (`nikrun/cli`)
 
-[![Build nik CLI](https://github.com/nikrun/cli/actions/workflows/build-cli.yml/badge.svg)](https://github.com/nikrun/cli/actions/workflows/build-cli.yml)
+[![Build and Test](https://github.com/nikrun/cli/actions/workflows/build.yml/badge.svg)](https://github.com/nikrun/cli/actions/workflows/build.yml)
 [![Build Portable FreePascal SDKs](https://github.com/nikrun/sdk/actions/workflows/build-fpc-sdk.yml/badge.svg)](https://github.com/nikrun/sdk/actions/workflows/build-fpc-sdk.yml)
 
 > **Modern, Zero-Config Toolchain & Developer Experience for Free Pascal**  
@@ -141,8 +141,12 @@ program:
 
 ```text
 cli/
-├── .github/workflows/
-│   └── build-cli.yml            # Multi-OS / Multi-Arch CI build & integration test matrix
+├── .github/
+│   ├── actions/build/           # Composite GitHub Action for SDK prep, build, test & packaging
+│   └── workflows/
+│       ├── build.yml            # Multi-OS / Multi-Arch CI build & integration test matrix
+│       └── release.yml          # Stable & Insider release workflow + auto version bump PRs
+├── build-lib/                   # Shared Nikrun build & release library (Git submodule)
 ├── lsp-protocol/                # Standalone, zero-dependency LSP 3.17 & JSON-RPC 2.0 library
 │   ├── src/nikrun.lsp.*.pas
 │   ├── tests/lsp_protocol_tests.pas
@@ -174,8 +178,10 @@ cli/
 │   ├── nik.lsp.check.pas        # Non-blocking ppc* -Cn workspace & unsaved-overlay check runner
 │   ├── nik.lsp.server.pas       # TNikPascalLspServer binding nikrun.lsp.server to Nikrun SDKs
 │   └── nik.cmd.lsp.pas          # `nik lsp` CLI parser (--stdio, --socket, --profile, --log-file)
+├── version.txt                  # Single source of truth SemVer (e.g. 0.1.0)
+├── changelog.yml                # Structured Keep-a-Changelog release history
 ├── prepare.ps1                  # Provisions & verifies newest prebuilt Nikrun FPC SDK from nikrun/sdk
-├── build.ps1                    # Compiles bin/nik(.exe) locally or stages release artifacts (-StageDist)
+├── build.ps1                    # Compiles, tests & packages nik-<versionTag>-<triplet>.zip + manifest.json
 └── test.ps1                     # End-to-end integration test suite + nikrun-lsp-protocol unit tests
 ```
 
@@ -184,16 +190,20 @@ cli/
 ## Building & Testing Locally
 
 ```powershell
-# 1. Provision newest prebuilt Nikrun FPC SDK into ~/.nikrun (if none is installed yet)
+# 1. Initialize submodules & provision newest prebuilt Nikrun FPC SDK into ~/.nikrun (first-time setup)
+git submodule update --init --recursive
 .\prepare.ps1
 
-# 2. Build debug binary (with DWARF debug info & runtime checks) -> bin/nik(.exe)
+# 2. Full build, test & package pipeline (outputs ZIP, release-notes.json & manifest.json to .out/)
 .\build.ps1
 
-# 3. Build optimized release binary and install into ~/.nikrun/bin
-.\build.ps1 -Profile release -Install
+# 3. Fast local compile without running test suites -> bin/nik(.exe)
+.\build.ps1 -Profile debug -RunTests:$false
 
-# 4. Run full end-to-end CLI & LSP test suite
+# 4. Build optimized release binary and install into ~/.nikrun/bin
+.\build.ps1 -Profile release -Install -RunTests:$false
+
+# 5. Run full end-to-end CLI & LSP test suite standalone
 .\test.ps1
 ```
 

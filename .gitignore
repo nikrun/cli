@@ -1,4 +1,6 @@
 # Build, test & staging directories
+.out/
+artifacts/
 dist/
 .work/
 .nikrun/
