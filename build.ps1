@@ -278,7 +278,7 @@ if (-not $ManifestOnly) {
     $ZipOutPath = Join-Path $ResolvedOutDir $ZipName
     Write-Host "  -> Packaging archive: $ZipOutPath"
     New-ZipArchive -SourceFiles @($BuiltExe) -DestinationZipPath $ZipOutPath | Out-Null
-    $ZipSha256  = New-Sha256File -FilePath $ZipOutPath
+    $ZipSha256  = Get-FileSha256 -FilePath $ZipOutPath
 
     if (-not [string]::IsNullOrWhiteSpace($env:GITHUB_STEP_SUMMARY)) {
         $commitStr   = $Toolchain.GitCommit
@@ -318,12 +318,7 @@ foreach ($triplet in $knownTriplets) {
     $zipName = "nik-${VersionTag}-${triplet}.zip"
     $zipPath = Join-Path $ResolvedOutDir $zipName
     if (Test-Path $zipPath) {
-        $shaFile = "$zipPath.sha256"
-        $sha256 = if (Test-Path $shaFile) {
-            ((Get-Content -Path $shaFile -Raw).Trim() -split '\s+')[0].ToLowerInvariant()
-        } else {
-            New-Sha256File -FilePath $zipPath
-        }
+        $sha256 = Get-FileSha256 -FilePath $zipPath
         $downloads[$triplet] = [ordered]@{
             "url"    = $zipName
             "size"   = (Get-Item $zipPath).Length

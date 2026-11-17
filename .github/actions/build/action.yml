@@ -124,8 +124,6 @@ runs:
       uses: actions/upload-artifact@v7
       with:
         name: nik-${{ steps.build.outputs.triplet }}
-        path: |
-          ${{ inputs.working-directory }}/artifacts/nik-*.zip
-          ${{ inputs.working-directory }}/artifacts/nik-*.zip.sha256
+        path: ${{ inputs.working-directory }}/artifacts/nik-*.zip
         if-no-files-found: error
         retention-days: 1
