@@ -1,6 +1,11 @@
 program nik;
 
 {$mode objfpc}{$H+}
+{$IFDEF WINDOWS}
+{$IFDEF NIK_HAS_WIN_RES}
+{$I nik_build_icon.inc}
+{$ENDIF}
+{$ENDIF}
 
 uses
   SysUtils,

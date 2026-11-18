@@ -69,6 +69,7 @@ $BuiltExe = ""
 
 if (-not $ManifestOnly) {
     $SrcDir            = [System.IO.Path]::Combine($RootDir, 'src')
+    $BrandIcoPath      = [System.IO.Path]::Combine($RootDir, 'brand', 'ico', 'nikrun.ico')
     $LspProtocolSrcDir = [System.IO.Path]::Combine($RootDir, 'lsp-protocol', 'src')
     $LazUtilsDir       = [System.IO.Path]::Combine($RootDir, 'vendor', 'lazarus', 'components', 'lazutils')
     $CodeToolsDir      = [System.IO.Path]::Combine($RootDir, 'vendor', 'lazarus', 'components', 'codetools')
@@ -201,12 +202,115 @@ if (-not $ManifestOnly) {
 
     $DefineFlag = if ($Profile -eq 'release') { '-dRELEASE' } else { '-dDEBUG' }
 
+    function Update-Win32IconResource([string]$IcoPath, [string]$ResPath) {
+        [byte[]]$IcoBytes = [System.IO.File]::ReadAllBytes($IcoPath)
+        if ($IcoBytes.Length -lt 6) {
+            throw "Invalid .ico file (too short): $IcoPath"
+        }
+        $reserved = [System.BitConverter]::ToUInt16($IcoBytes, 0)
+        $icoType  = [System.BitConverter]::ToUInt16($IcoBytes, 2)
+        $count    = [System.BitConverter]::ToUInt16($IcoBytes, 4)
+        if ($reserved -ne 0 -or $icoType -ne 1 -or $count -lt 1) {
+            throw "Invalid .ico header: $IcoPath"
+        }
+
+        function Write-DwordPad([System.IO.BinaryWriter]$W) {
+            $rem = [int]($W.BaseStream.Position % 4)
+            if ($rem -ne 0) {
+                for ($p = 0; $p -lt (4 - $rem); $p++) { $W.Write([byte]0) }
+            }
+        }
+        function Write-ResHdr([System.IO.BinaryWriter]$W, [uint32]$DataLen, [uint16]$TypeId, [uint16]$NameId, [uint16]$Flags, [uint16]$Lang) {
+            $W.Write([uint32]$DataLen)
+            $W.Write([uint32]32)
+            $W.Write([uint16]0xFFFF); $W.Write([uint16]$TypeId)
+            $W.Write([uint16]0xFFFF); $W.Write([uint16]$NameId)
+            $W.Write([uint32]0)
+            $W.Write([uint16]$Flags); $W.Write([uint16]$Lang)
+            $W.Write([uint32]0); $W.Write([uint32]0)
+        }
+
+        $resMs = [System.IO.MemoryStream]::new()
+        $rw    = [System.IO.BinaryWriter]::new($resMs)
+        $grpMs = [System.IO.MemoryStream]::new()
+        $gw    = [System.IO.BinaryWriter]::new($grpMs)
+
+        Write-ResHdr $rw 0 0 0 0 0
+
+        $gw.Write([uint16]0)
+        $gw.Write([uint16]1)
+        $gw.Write([uint16]$count)
+
+        for ($i = 0; $i -lt $count; $i++) {
+            $entryOff  = 6 + ($i * 16)
+            $imgSize   = [System.BitConverter]::ToUInt32($IcoBytes, $entryOff + 8)
+            $imgOffset = [System.BitConverter]::ToUInt32($IcoBytes, $entryOff + 12)
+            $iconId    = [uint16]($i + 1)
+
+            Write-ResHdr $rw $imgSize 3 $iconId 0x1010 0x0409
+            $rw.Write($IcoBytes, [int]$imgOffset, [int]$imgSize)
+            Write-DwordPad $rw
+
+            $gw.Write($IcoBytes, $entryOff, 12)
+            $gw.Write($iconId)
+        }
+
+        $gw.Flush()
+        [byte[]]$grpBytes = $grpMs.ToArray()
+        $gw.Dispose(); $grpMs.Dispose()
+
+        Write-ResHdr $rw ([uint32]$grpBytes.Length) 14 1 0x1030 0x0409
+        $rw.Write($grpBytes)
+        Write-DwordPad $rw
+        $rw.Flush()
+
+        [byte[]]$NewResBytes = $resMs.ToArray()
+        $rw.Dispose(); $resMs.Dispose()
+
+        $WriteRes = $true
+        if (Test-Path $ResPath) {
+            [byte[]]$OldResBytes = [System.IO.File]::ReadAllBytes($ResPath)
+            if ($OldResBytes.Length -eq $NewResBytes.Length) {
+                $WriteRes = $false
+                for ($bIdx = 0; $bIdx -lt $NewResBytes.Length; $bIdx++) {
+                    if ($OldResBytes[$bIdx] -ne $NewResBytes[$bIdx]) {
+                        $WriteRes = $true
+                        break
+                    }
+                }
+            }
+        }
+        if ($WriteRes) {
+            [System.IO.File]::WriteAllBytes($ResPath, $NewResBytes)
+        }
+    }
+
+    $WinResArgs = @()
+    if ($Toolchain.TargetOs -eq 'win64') {
+        if (-not (Test-Path $BrandIcoPath)) {
+            throw "Nikrun brand icon not found at: $BrandIcoPath (run 'git submodule update --init --depth 1')."
+        }
+        $ResSrcDir      = [System.IO.Path]::Combine($CacheDir, 'res-src')
+        New-Item -ItemType Directory -Force -Path $ResSrcDir | Out-Null
+        $IconResPath    = [System.IO.Path]::Combine($ResSrcDir, 'nik_build_icon.res')
+        Update-Win32IconResource -IcoPath $BrandIcoPath -ResPath $IconResPath
+        $RelResPath     = "../.cache/$($Toolchain.TargetTriplet)-$Profile/res-src/nik_build_icon.res"
+        $IconIncPath    = [System.IO.Path]::Combine($CacheDir, 'nik_build_icon.inc')
+        $IconIncContent = '{$R ''' + $RelResPath + '''}' + "`n"
+        $ExistingIconInc = if (Test-Path $IconIncPath) { [System.IO.File]::ReadAllText($IconIncPath) } else { '' }
+        if ($ExistingIconInc -cne $IconIncContent) {
+            [System.IO.File]::WriteAllText($IconIncPath, $IconIncContent, [System.Text.UTF8Encoding]::new($false))
+        }
+        $WinResArgs = @('-dNIK_HAS_WIN_RES')
+    }
+
     Write-Host "  -> Compiling nik ($($Toolchain.TargetTriplet), SDK $($Toolchain.SdkId))..."
     $fpcArgs = @(
         '-n',
         "@$($Toolchain.FpcCfg)",
         $DefineFlag,
-        '-dNIK_HAS_BUILD_VERSION',
+        '-dNIK_HAS_BUILD_VERSION'
+    ) + $WinResArgs + @(
         "-Fi$CacheDir",
         "-Fu$LazUtilsDir",
         "-Fi$LazUtilsDir",
