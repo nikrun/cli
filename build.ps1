@@ -277,7 +277,8 @@ if (-not $ManifestOnly) {
     $ZipName    = "nik-${VersionTag}-$($Toolchain.TargetTriplet).zip"
     $ZipOutPath = Join-Path $ResolvedOutDir $ZipName
     Write-Host "  -> Packaging archive: $ZipOutPath"
-    New-ZipArchive -SourceFiles @($BuiltExe) -DestinationZipPath $ZipOutPath | Out-Null
+    $LicenseFile = Join-Path $RootDir "LICENSE"
+    New-ZipArchive -SourceFiles @($BuiltExe, $LicenseFile) -DestinationZipPath $ZipOutPath | Out-Null
     $ZipSha256  = Get-FileSha256 -FilePath $ZipOutPath
 
     if (-not [string]::IsNullOrWhiteSpace($env:GITHUB_STEP_SUMMARY)) {

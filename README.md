@@ -219,4 +219,8 @@ git submodule update --init --recursive
 
 ## License
 
-Licensed under the [MIT License](./LICENSE).
+Copyright (c) 2026 The Nikrun Contributors.
+
+Licensed under the **GNU General Public License v3.0 or later** (`GPL-3.0-or-later`) — see [LICENSE](./LICENSE).
+
+> **Note on Projects Built with `nik`:** Using `nik` to initialize (`nik init`), analyze (`nik lsp`), or compile (`nik build`) your own Object Pascal applications, libraries, or packages imposes **no** licensing restrictions on your source code or compiled binaries. You remain free to license and distribute your own projects under any open-source or commercial/proprietary terms.

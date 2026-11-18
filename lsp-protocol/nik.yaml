@@ -4,7 +4,7 @@ package:
   name: nikrun-lsp-protocol
   version: 0.1.0
   description: Standalone Language Server Protocol (LSP 3.17) and JSON-RPC 2.0 library for Free Pascal
-  license: MIT
+  license: GPL-3.0-or-later
   repository: https://github.com/nikrun/cli
 
   build:

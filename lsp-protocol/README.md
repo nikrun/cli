@@ -3,7 +3,7 @@
 > **Standalone, Zero-Dependency Language Server Protocol (LSP 3.17) & JSON-RPC 2.0 Library for Free Pascal**  
 > Maintained inside [`https://github.com/nikrun/cli`](https://github.com/nikrun/cli) (`lsp-protocol/`)
 
-`nikrun-lsp-protocol` provides a clean-room, MIT-licensed implementation of the **Language Server Protocol (LSP 3.17)** and **JSON-RPC 2.0** in pure Object Pascal (`{$mode objfpc}{$H+}`).
+`nikrun-lsp-protocol` provides a clean-room implementation of the **Language Server Protocol (LSP 3.17)** and **JSON-RPC 2.0** in pure Object Pascal (`{$mode objfpc}{$H+}`), licensed under the GNU GPLv3+ (`GPL-3.0-or-later`).
 
 It is completely independent of Lazarus/`CodeTools` and independent of the `nik` CLI—relying exclusively on standard Free Pascal RTL/FCL units (`SysUtils`, `Classes`, `fpjson`, `jsonparser`, `ssockets`) and compiling cleanly on both **Free Pascal `3.2.2` and `3.3.1`** across `win64`, `linux`, and `darwin` (`x86_64` & `aarch64`).
 
@@ -58,4 +58,6 @@ fpc -Mobjfpc -Sh -Fusrc -FEbin tests/lsp_protocol_tests.pas
 
 ## License
 
-MIT License — see [LICENSE](./LICENSE).
+Copyright (c) 2026 The Nikrun Contributors.
+
+Licensed under the **GNU General Public License v3.0 or later** (`GPL-3.0-or-later`) — see [LICENSE](./LICENSE).
