@@ -15,7 +15,7 @@ function RunCompile(const ASpec: TCompileSpec): TCompileResult;
 implementation
 
 uses
-  Process, nik.fs;
+  Process, nik.fs, nik.paths, nik.sha256;
 
 procedure AppendArg(var AArgs: TStringArray; const AArg: string);
 var
@@ -450,18 +450,83 @@ begin
   AssembleCompilerArgs(Result.Spec, Result.CompilerArgs);
 end;
 
+function ComputeCompileCacheFingerprint(const APrepared: TPreparedCompile): string;
+var
+  Payload, MPath, MHash: string;
+  I: Integer;
+begin
+  Payload := 'nik-compile-cache-v1' + #10 +
+             'compiler=' + APrepared.Spec.CompilerBinary + #10 +
+             'fpccfg=' + APrepared.Spec.FpcCfgPath + #10 +
+             'target=' + APrepared.Spec.TargetCpu + '-' + APrepared.Spec.TargetOs + #10;
+
+  for I := 0 to High(APrepared.Spec.ManifestFiles) do
+  begin
+    MPath := APrepared.Spec.ManifestFiles[I];
+    if (MPath <> '') and FileExists(MPath) then
+    begin
+      try
+        MHash := Sha256FileHex(MPath);
+      except
+        MHash := 'unreadable';
+      end;
+    end
+    else
+      MHash := 'missing';
+    Payload := Payload + 'manifest:' + MPath + '=' + MHash + #10;
+  end;
+
+  for I := 0 to High(APrepared.CompilerArgs) do
+  begin
+    if APrepared.CompilerArgs[I] = '-B' then
+      Continue;
+    Payload := Payload + 'arg:' + APrepared.CompilerArgs[I] + #10;
+  end;
+
+  Result := Sha256StringHex(RawByteString(Payload));
+end;
+
 function ExecuteCompile(const APrepared: TPreparedCompile): TCompileResult;
+var
+  NeedPurge: Boolean;
+  Fingerprint, FingerprintPath, ExistingFp: string;
 begin
   Result := Default(TCompileResult);
   Result.Spec := APrepared.Spec;
   Result.CompilerArgs := APrepared.CompilerArgs;
 
-  if Result.Spec.CleanRebuild and (Result.Spec.UnitOutputDir <> '') and
-     DirectoryExists(Result.Spec.UnitOutputDir) then
-    DeleteDirectoryRecursive(Result.Spec.UnitOutputDir);
-
   if Result.Spec.UnitOutputDir <> '' then
+  begin
+    Fingerprint := ComputeCompileCacheFingerprint(APrepared);
+    FingerprintPath := JoinPath(Result.Spec.UnitOutputDir, '.nik-cache-fingerprint');
+    NeedPurge := Result.Spec.CleanRebuild;
+
+    if (not NeedPurge) and DirectoryExists(Result.Spec.UnitOutputDir) then
+    begin
+      if not FileExists(FingerprintPath) then
+        NeedPurge := True
+      else
+      begin
+        try
+          ExistingFp := Trim(ReadFileTextUtf8(FingerprintPath));
+        except
+          ExistingFp := '';
+        end;
+        if ExistingFp <> Fingerprint then
+          NeedPurge := True;
+      end;
+    end;
+
+    if NeedPurge and DirectoryExists(Result.Spec.UnitOutputDir) then
+      DeleteDirectoryRecursive(Result.Spec.UnitOutputDir);
+
     EnsureDirExists(Result.Spec.UnitOutputDir);
+    try
+      WriteFileTextUtf8(FingerprintPath, Fingerprint + LineEnding);
+    except
+      // Non-fatal if cache metadata cannot be persisted
+    end;
+  end;
 
   if (Result.Spec.ArtifactKind <> cakCheckOnly) and (Result.Spec.OutputBinaryPath <> '') then
     EnsureDirExists(ExtractFileDir(Result.Spec.OutputBinaryPath));

@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Runs end-to-end automated integration tests for the nik CLI (`nik sdk` commands).
 
@@ -1190,14 +1190,15 @@ end.
         Assert-True ($null -ne $defResp -and @($defResp.result).Count -ge 1 -and $defResp.result[0].uri -match 'GreeterUnit\.pas$') 'nik lsp resolves cross-package Go-to-Definition via nik.yaml dependencies'
 
         $hovResp = @($sess2.Frames | Where-Object { $_.PSObject.Properties['id'] -and $_.id -eq 13 })[0]
-        Assert-True ($null -ne $hovResp -and $hovResp.result.contents.value -match 'BuildGreeting' -and $hovResp.result.contents.value -match 'friendly greeting string') 'nik lsp Hover displays signature and preceding /// doc comment'
+        Assert-True ($null -ne $hovResp -and $hovResp.result.contents.value -match 'function BuildGreeting\(const AName: string\): string;' -and $hovResp.result.contents.value -match 'friendly greeting string') 'nik lsp Hover displays formatted signature and preceding /// doc comment'
 
         $sigResp = @($sess2.Frames | Where-Object { $_.PSObject.Properties['id'] -and $_.id -eq 14 })[0]
-        Assert-True ($null -ne $sigResp -and @($sigResp.result.signatures).Count -ge 1 -and $sigResp.result.signatures[0].parameters[0].label -match 'AName') 'nik lsp SignatureHelp extracts routine parameter labels'
+        Assert-True ($null -ne $sigResp -and @($sigResp.result.signatures).Count -ge 1 -and $sigResp.result.signatures[0].parameters[0].label -match 'const AName: string') 'nik lsp SignatureHelp extracts formatted routine parameter labels'
 
         $cmpResp = @($sess2.Frames | Where-Object { $_.PSObject.Properties['id'] -and $_.id -eq 15 })[0]
         $cmpLabels = @($cmpResp.result.items | ForEach-Object { $_.label })
-        Assert-True ($cmpLabels -contains 'BuildGreeting' -and $cmpLabels -contains 'TRunner') 'nik lsp Completion suggests local and imported package symbols'
+        $bgItem = @($cmpResp.result.items | Where-Object { $_.label -eq 'BuildGreeting' })[0]
+        Assert-True ($cmpLabels -contains 'BuildGreeting' -and $cmpLabels -contains 'TRunner' -and $bgItem.detail -eq 'function BuildGreeting(const AName: string): string;') 'nik lsp Completion suggests local and imported package symbols with formatted detail'
 
         $rtlDefResp = @($sess2.Frames | Where-Object { $_.PSObject.Properties['id'] -and $_.id -eq 16 })[0]
         Assert-True ($null -ne $rtlDefResp -and @($rtlDefResp.result).Count -ge 1 -and $rtlDefResp.result[0].uri -match 'sysutils\.(pp|pas)$') 'nik lsp resolves Go-to-Definition directly into bundled Nikrun SDK source/rtl (SysUtils)'
@@ -1282,6 +1283,161 @@ end.
         Assert-True $sawCrossUnitErr 'nik lsp re-validates open dependent units against unsaved edits in imported units'
         $finalAppDiags = @($appDiagFrames[$appDiagFrames.Count - 1].params.diagnostics)
         Assert-True ($finalAppDiags.Count -eq 0) 'nik lsp clears dependent unit diagnostics automatically when unsaved imported unit is closed'
+
+        # Session 5: CodeTools semantic resolution — {$IFDEF} + {$I *.inc}, incomplete-line dot completion (Worker.), declaration vs definition toggle, and checkout-local cache
+        $LspCtDir = Join-Path $WorkDir 'lsp-codetools'
+        $LspCtSrc = Join-Path $LspCtDir 'src'
+        $LspCtInc = Join-Path $LspCtDir 'inc'
+        New-Item -ItemType Directory -Force -Path $LspCtSrc, $LspCtInc | Out-Null
+
+        @"
+program:
+  name: lsp-codetools
+  entry: src/CtApp.pas
+  toolchain:
+    fpc: $CandidateLspFpcVersion
+  build:
+    unitPaths: [src]
+    includePaths: [inc]
+    defines: [FEATURE_ALPHA]
+"@ | Set-Content -Path (Join-Path $LspCtDir 'nik.yaml') -Encoding UTF8
+
+        @"
+{`$IFDEF FEATURE_ALPHA}
+/// Returned only when FEATURE_ALPHA is active in nik.yaml.
+function ActiveFeatureValue: Integer;
+{`$ELSE}
+function InactiveFeatureOnly: Integer;
+{`$ENDIF}
+"@ | Set-Content -Path (Join-Path $LspCtInc 'feature_header.inc') -Encoding UTF8
+
+        @"
+unit FeatureUnit;
+{`$mode objfpc}{`$H+}
+interface
+
+{`$I feature_header.inc}
+
+implementation
+
+{`$IFDEF FEATURE_ALPHA}
+function ActiveFeatureValue: Integer;
+begin
+  Result := 7;
+end;
+{`$ELSE}
+function InactiveFeatureOnly: Integer;
+begin
+  Result := 0;
+end;
+{`$ENDIF}
+
+end.
+"@ | Set-Content -Path (Join-Path $LspCtSrc 'FeatureUnit.pas') -Encoding UTF8
+
+        $CtAppPas = Join-Path $LspCtSrc 'CtApp.pas'
+        @"
+program CtApp;
+{`$mode objfpc}{`$H+}
+uses
+  SysUtils, FeatureUnit;
+
+type
+  TWorker = class
+  public
+    procedure RunTask;
+  end;
+
+procedure TWorker.RunTask;
+begin
+  WriteLn(ActiveFeatureValue);
+end;
+
+var
+  Worker: TWorker;
+begin
+  Worker.RunTask;
+end.
+"@ | Set-Content -Path $CtAppPas -Encoding UTF8
+
+        $FeaturePas = Join-Path $LspCtSrc 'FeatureUnit.pas'
+        $ctRootUri = ConvertTo-FileUri $LspCtDir
+        $ctAppUri  = ConvertTo-FileUri $CtAppPas
+        $featureUri = ConvertTo-FileUri $FeaturePas
+        $ctAppText = [System.IO.File]::ReadAllText($CtAppPas)
+        $featureText = [System.IO.File]::ReadAllText($FeaturePas)
+        $ctIncompleteDotText = $ctAppText.Replace('  Worker.RunTask;', '  Worker.')
+
+        $sess5 = Invoke-LspSession -NikHomeDir $CandidateLspHome -ProjectPath $LspCtDir -LogPath '' -Messages @(
+            @{ jsonrpc = '2.0'; id = 50; method = 'initialize'; params = @{ processId = $PID; rootUri = $ctRootUri } },
+            @{ jsonrpc = '2.0'; method = 'initialized'; params = @{} },
+            # Open FeatureUnit.pas (UTF-8 BOM on disk, stripped by ReadAllText/VS Code) which includes UTF-8 BOM feature_header.inc -> must NOT emit FPC Error 2089
+            @{ jsonrpc = '2.0'; method = 'textDocument/didOpen'; params = @{ textDocument = @{ uri = $featureUri; languageId = 'objectpascal'; version = 1; text = $featureText } } },
+            @{ __waitDiagCount = @{ uri = $featureUri; count = 1 } },
+            @{ jsonrpc = '2.0'; method = 'textDocument/didOpen'; params = @{ textDocument = @{ uri = $ctAppUri; languageId = 'objectpascal'; version = 1; text = $ctAppText } } },
+            # 51: Go to Definition on ActiveFeatureValue (line 13, char 14) -> resolves into inc/feature_header.inc
+            @{ jsonrpc = '2.0'; id = 51; method = 'textDocument/definition'; params = @{ textDocument = @{ uri = $ctAppUri }; position = @{ line = 13; character = 14 } } },
+            # 52: Completion inside RunTask body -> contains ActiveFeatureValue, excludes InactiveFeatureOnly from inactive {$ELSE}
+            @{ jsonrpc = '2.0'; id = 52; method = 'textDocument/completion'; params = @{ textDocument = @{ uri = $ctAppUri }; position = @{ line = 13; character = 14 } } },
+            # 53: Definition on interface/class header 'procedure RunTask;' (line 8, char 16) -> jumps to implementation body (line 11)
+            @{ jsonrpc = '2.0'; id = 53; method = 'textDocument/definition'; params = @{ textDocument = @{ uri = $ctAppUri }; position = @{ line = 8; character = 16 } } },
+            # 54: Declaration on implementation body 'procedure TWorker.RunTask;' (line 11, char 20) -> jumps to class header (line 8)
+            @{ jsonrpc = '2.0'; id = 54; method = 'textDocument/declaration'; params = @{ textDocument = @{ uri = $ctAppUri }; position = @{ line = 11; character = 20 } } },
+            # Unsaved incomplete typing edit: '  Worker.' (broken syntax without semicolon/member) -> dot completion at line 19, char 9
+            @{ jsonrpc = '2.0'; method = 'textDocument/didChange'; params = @{ textDocument = @{ uri = $ctAppUri; version = 2 }; contentChanges = @( @{ text = $ctIncompleteDotText } ) } },
+            @{ jsonrpc = '2.0'; id = 55; method = 'textDocument/completion'; params = @{ textDocument = @{ uri = $ctAppUri }; position = @{ line = 19; character = 9 } } },
+            @{ jsonrpc = '2.0'; id = 56; method = 'shutdown' },
+            @{ jsonrpc = '2.0'; method = 'exit' }
+        )
+
+        Assert-True ($sess5.Exited -and $sess5.ExitCode -eq 0) 'CodeTools semantic nik lsp session exits cleanly with code 0'
+
+        $featureDiagFrame = @($sess5.Frames | Where-Object { $_.PSObject.Properties['method'] -and $_.method -eq 'textDocument/publishDiagnostics' -and $_.params.uri -eq $featureUri })[0]
+        Assert-True ($null -ne $featureDiagFrame -and @($featureDiagFrame.params.diagnostics).Count -eq 0) 'nik lsp preserves UTF-8 BOM on overlay files so open units including UTF-8 BOM .inc files do not trigger FPC Error 2089'
+
+        $incDefResp = @($sess5.Frames | Where-Object { $_.PSObject.Properties['id'] -and $_.id -eq 51 })[0]
+        Assert-True ($null -ne $incDefResp -and @($incDefResp.result).Count -ge 1 -and $incDefResp.result[0].uri -match 'feature_header\.inc$') 'CodeTools resolves Go-to-Definition into {$I feature_header.inc} via nik.yaml includePaths and defines'
+
+        $condCmpResp = @($sess5.Frames | Where-Object { $_.PSObject.Properties['id'] -and $_.id -eq 52 })[0]
+        $condLabels = @($condCmpResp.result.items | ForEach-Object { $_.label })
+        Assert-True (($condLabels -contains 'ActiveFeatureValue') -and ($condLabels -notcontains 'InactiveFeatureOnly')) 'CodeTools evaluates nik.yaml defines ({$IFDEF FEATURE_ALPHA}) accurately in Completion'
+
+        $jumpImplResp = @($sess5.Frames | Where-Object { $_.PSObject.Properties['id'] -and $_.id -eq 53 })[0]
+        Assert-True ($null -ne $jumpImplResp -and @($jumpImplResp.result).Count -ge 1 -and $jumpImplResp.result[0].range.start.line -ge 11 -and $jumpImplResp.result[0].range.start.line -le 13) 'Go-to-Definition on class method header jumps to implementation body'
+
+        $jumpDeclResp = @($sess5.Frames | Where-Object { $_.PSObject.Properties['id'] -and $_.id -eq 54 })[0]
+        Assert-True ($null -ne $jumpDeclResp -and @($jumpDeclResp.result).Count -ge 1 -and $jumpDeclResp.result[0].range.start.line -eq 8) 'Go-to-Declaration on method implementation jumps back to class declaration'
+
+        $dotCmpResp = @($sess5.Frames | Where-Object { $_.PSObject.Properties['id'] -and $_.id -eq 55 })[0]
+        $dotLabels = @($dotCmpResp.result.items | ForEach-Object { $_.label })
+        Assert-True (($dotLabels -contains 'RunTask') -and ($dotLabels -contains 'Free') -and ($dotLabels -notcontains 'ActiveFeatureValue')) 'CodeTools resolves instance variable type on incomplete line (Worker.) for dot completion'
+
+        $ctCacheXml = Get-ChildItem -Path (Join-Path $LspCtDir '.nik') -Recurse -Filter 'codetools-config.xml' -ErrorAction SilentlyContinue
+        Assert-True ($null -ne $ctCacheXml -and @($ctCacheXml).Count -ge 1) 'CodeTools persists compiler defines cache strictly inside checkout-local .nik/cache/'
+
+        # Session 6: Automatic .ppu cache invalidation when nik.yaml changes (both nik build and nik lsp)
+        $ctManifestPath = Join-Path $LspCtDir 'nik.yaml'
+        $buildAlpha = Invoke-Nik -NikHome $CandidateLspHome -Arguments @('build', '--manifest', $ctManifestPath)
+        Assert-True ($buildAlpha.ExitCode -eq 0) 'nik build compiles CtApp cleanly when FEATURE_ALPHA is defined in nik.yaml'
+
+        $ctManifestRaw = [System.IO.File]::ReadAllText($ctManifestPath)
+        $ctManifestRaw.Replace('FEATURE_ALPHA', 'FEATURE_TYPO') | Set-Content -Path $ctManifestPath -Encoding UTF8
+
+        $buildTypo = Invoke-Nik -NikHome $CandidateLspHome -Arguments @('build', '--manifest', $ctManifestPath) -AllowFailure
+        Assert-True (($buildTypo.ExitCode -ne 0) -and ($buildTypo.Output -match 'ActiveFeatureValue')) 'nik build invalidates cached .ppu files automatically when nik.yaml defines change without requiring --clean'
+
+        $sess6 = Invoke-LspSession -NikHomeDir $CandidateLspHome -ProjectPath $LspCtDir -LogPath '' -Messages @(
+            @{ jsonrpc = '2.0'; id = 60; method = 'initialize'; params = @{ processId = $PID; rootUri = $ctRootUri } },
+            @{ jsonrpc = '2.0'; method = 'initialized'; params = @{} },
+            @{ jsonrpc = '2.0'; method = 'textDocument/didOpen'; params = @{ textDocument = @{ uri = $ctAppUri; languageId = 'objectpascal'; version = 1; text = $ctAppText } } },
+            @{ __waitDiagCount = @{ uri = $ctAppUri; count = 1 } },
+            @{ jsonrpc = '2.0'; id = 61; method = 'shutdown' },
+            @{ jsonrpc = '2.0'; method = 'exit' }
+        )
+
+        Assert-True ($sess6.Exited -and $sess6.ExitCode -eq 0) 'Cache-invalidation nik lsp session exits cleanly with code 0'
+        $ctAppDiagFrame = @($sess6.Frames | Where-Object { $_.PSObject.Properties['method'] -and $_.method -eq 'textDocument/publishDiagnostics' -and $_.params.uri -eq $ctAppUri })[0]
+        Assert-True ($null -ne $ctAppDiagFrame -and @($ctAppDiagFrame.params.diagnostics).Count -ge 1 -and $ctAppDiagFrame.params.diagnostics[0].message -match 'ActiveFeatureValue') 'nik lsp purges stale cached .ppu files when nik.yaml defines change so dependent main program reports missing identifier immediately'
     }
 
     Write-Host "`n [OK] All nik CLI tests PASSED!" -ForegroundColor Green

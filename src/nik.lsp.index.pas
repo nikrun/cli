@@ -6,25 +6,18 @@ interface
 
 uses
   SysUtils, Classes, Contnrs,
-  nikrun.lsp.types, nikrun.lsp.uri, nikrun.lsp.utf16;
+  nik.lsp.check,
+  nikrun.lsp.types, nikrun.lsp.uri, nikrun.lsp.utf16, nikrun.lsp.documents;
 
 type
-  TPasUnitSymbol = record
+  TPasWorkspaceSymbolEntry = record
     Name: string;
     NameLower: string;
     ContainerName: string;
-    Detail: string;
-    Signature: string;
-    DocComment: string;
-    Params: TLspStringArray;
     Kind: TLspSymbolKind;
-    CompletionKind: TLspCompletionItemKind;
-    IsInterfaceSection: Boolean;
-    ParentSymbolIndex: Integer; // -1 for root
-    Range: TLspRange;
     SelectionRange: TLspRange;
   end;
-  TPasUnitSymbolArray = array of TPasUnitSymbol;
+  TPasWorkspaceSymbolArray = array of TPasWorkspaceSymbolEntry;
 
   TPasIndexedFile = class
   public
@@ -34,81 +27,90 @@ type
     ModuleName: string;
     ModuleNameLower: string;
     UsedUnits: TLspStringArray;
-    Symbols: TPasUnitSymbolArray;
+    Symbols: TPasWorkspaceSymbolArray;
   end;
 
   TNikSymbolIndex = class
   private
-    FFiles: TFPList;            // Owns TPasIndexedFile
-    FFileKeyHash: TFPHashList;  // O(1) NormalizedKey -> Pointer(PtrInt(FileIndex + 1))
-    FSearchDirs: TStringList;   // Project unit paths + SDK rtl/packages source dirs
-    FUnitPathsPool: TStringList;// Stores full path strings indexed by FUnitHash
-    FUnitHash: TFPHashList;     // O(1) unitname_lower -> Pointer(PtrInt(PoolIndex + 1))
-    procedure SetUnitMapEntry(const AUnitLower, AFullPath: string; AOverwrite: Boolean);
-    function GetUnitMapEntry(const AUnitLower: string): string;
-    procedure RebuildUnitFileMap;
-    procedure ScanDirectoryForUnits(const ADir: string; AMaxDepth: Integer);
+    FFiles: TFPList;           // Owns TPasIndexedFile (workspace symbol & uses cache)
+    FFileKeyHash: TFPHashList; // O(1) NormalizedKey -> Pointer(PtrInt(FileIndex + 1))
+    FCodeToolsReady: Boolean;
+
+    procedure EnsureCodeToolsBaseInitialized;
+    procedure HandleCodeCacheDecodeLoaded(ACode: TObject; const AFilename: string;
+      var ASource, ADiskEncoding, AMemEncoding: string);
+    procedure ApplyWorkspaceDefineTemplates(const ADirs, AUnitPaths, AIncludePaths,
+      ADefines, AUndefines: array of string);
     function FindIndexedByKey(const ANormalizedKey: string): Integer;
-    function FindIndexedByUnitLower(const AUnitLower: string): TPasIndexedFile;
-    function EnsureUnitIndexed(const AUnitName: string): TPasIndexedFile;
+    procedure StoreIndexedFile(AParsed: TPasIndexedFile);
+    procedure RemoveIndexedByKey(const ANormalizedKey: string);
+    procedure IndexProjectDirectories(const AProjectUnitDirs: array of string);
   public
     constructor Create;
     destructor Destroy; override;
 
     procedure Clear;
-    procedure ConfigureSearchPaths(const AProjectUnitDirs: array of string;
-      const ARtlSourceDir, APackagesSourceDir: string);
-    procedure IndexProjectUnitDirs(const AProjectUnitDirs: array of string);
+    procedure ConfigureWorkspace(const AContext: TNikWorkspaceContext;
+      AWorkspaceReady: Boolean; const AFallbackRootDir: string);
 
-    function IndexText(const AUri, AFilePath, ASourceText: string): TPasIndexedFile;
-    function IndexDiskFile(const AFilePath: string): TPasIndexedFile;
+    function SyncOpenDocument(const AUri, AFilePath, ASourceText: string): TPasIndexedFile;
+    procedure CloseOpenDocument(const AUri, AFilePath: string);
+    function RefreshDiskFile(const AFilePath: string): TPasIndexedFile;
+
     function FindFileByUri(const AUri: string): TPasIndexedFile;
-    function DoesFileUseUnit(const AUri, AUnitNameLower: string): Boolean;
+    function DoesFileUseUnit(const AUri, AFilePath, AUnitNameLower: string): Boolean;
 
-    function BuildDocumentSymbols(const AUri: string): TLspDocumentSymbolArray;
+    function BuildDocumentSymbols(const AUri, AFilePath: string): TLspDocumentSymbolArray;
     function SearchWorkspaceSymbols(const AQuery: string; AMaxResults: Integer = 100): TLspSymbolInformationArray;
-    function ResolveDefinitions(const AUri, AIdent: string): TLspLocationArray;
-    function ResolveHover(const AUri, AIdent: string; const AWordRange: TLspRange): TLspHover;
-    function ResolveCompletions(const AUri, ALinePrefix: string): TLspCompletionList;
-    function ResolveSignatureHelp(const AUri, ACalleeIdent: string; AActiveParam: Integer): TLspSignatureHelp;
+    function ResolveDefinitions(const AUri, AFilePath: string; ADoc: TLspDocument;
+      const APos: TLspPosition): TLspLocationArray;
+    function ResolveDeclarations(const AUri, AFilePath: string; ADoc: TLspDocument;
+      const APos: TLspPosition): TLspLocationArray;
+    function ResolveHover(const AUri, AFilePath: string; ADoc: TLspDocument;
+      const APos: TLspPosition): TLspHover;
+    function ResolveCompletions(const AUri, AFilePath: string; ADoc: TLspDocument;
+      const APos: TLspPosition): TLspCompletionList;
+    function ResolveSignatureHelp(const AUri, AFilePath: string; ADoc: TLspDocument;
+      const APos: TLspPosition): TLspSignatureHelp;
   end;
-
-function ParsePascalSourceSymbols(const AUri, AFilePath, AText: string): TPasIndexedFile;
 
 implementation
 
 uses
-  nik.types, nik.paths;
+  LazLoggerBase,
+  CodeToolManager, CodeToolsConfig, CodeCache, CodeTree, CustomCodeTool,
+  PascalParserTool, PascalReaderTool, FindDeclarationTool, IdentCompletionTool,
+  DefineTemplates, BasicCodeTools, LinkScanner, SourceChanger,
+  nik.types, nik.paths, nik.fs, nik.sdk.manager;
 
-type
-  TTokKind = (ttkEof, ttkIdent, ttkSymbol, ttkString, ttkNumber);
+const
+  NIK_WORKSPACE_TEMPLATE_NAME = 'NikrunWorkspace';
 
-  TToken = record
-    Kind: TTokKind;
-    Text: string;
-    Lower: string;
-    Line: Integer;     // 0-based
-    StartCol: Integer; // 0-based UTF-16 col
-    EndCol: Integer;   // 0-based UTF-16 col
-    PrecedingDoc: string;
+var
+  GLoggerSilenced: Boolean = False;
+
+procedure SilenceCodeToolsLogger;
+begin
+  if not GLoggerSilenced then
+  begin
+    SetDebugLogger(TLazLoggerNoOutput.Create);
+    GLoggerSilenced := True;
   end;
-  TTokenArray = array of TToken;
-
-function IsIdentStart(ACh: Char): Boolean; inline;
-begin
-  Result := ((ACh >= 'A') and (ACh <= 'Z')) or ((ACh >= 'a') and (ACh <= 'z')) or (ACh = '_');
 end;
 
-function IsIdentCont(ACh: Char): Boolean; inline;
+function QuoteFpcOptIfNeeded(const AOpt: string): string;
 begin
-  Result := IsIdentStart(ACh) or ((ACh >= '0') and (ACh <= '9'));
+  if Pos(' ', AOpt) > 0 then
+    Result := '"' + AOpt + '"'
+  else
+    Result := AOpt;
 end;
 
-procedure AppendStr(var AArr: TLspStringArray; const AVal: string);
+procedure AppendUniqueStr(var AArr: TLspStringArray; const AVal: string);
 var
   I, N: Integer;
 begin
-  if AVal = '' then
+  if Trim(AVal) = '' then
     Exit;
   for I := 0 to High(AArr) do
     if SameText(AArr[I], AVal) then
@@ -118,23 +120,246 @@ begin
   AArr[N] := AVal;
 end;
 
-function CleanCommentText(const ARaw: string): string;
+procedure AppendUniqueNativePath(var APaths: TStringArray; const APath: string);
 var
+  Clean: string;
+  I, N: Integer;
+begin
+  Clean := ExcludeTrailingPathDelimiter(Trim(APath));
+  if Clean = '' then
+    Exit;
+  Clean := ExpandFileName(NormalizeNativeSeparators(Clean));
+  for I := 0 to High(APaths) do
+  begin
+    {$IFDEF WINDOWS}
+    if SameText(APaths[I], Clean) then
+      Exit;
+    {$ELSE}
+    if APaths[I] = Clean then
+      Exit;
+    {$ENDIF}
+  end;
+  N := Length(APaths);
+  SetLength(APaths, N + 1);
+  APaths[N] := Clean;
+end;
+
+function JoinSemicolonPaths(const APaths: array of string): string;
+var
+  I: Integer;
+  P: string;
+begin
+  Result := '';
+  for I := Low(APaths) to High(APaths) do
+  begin
+    P := ExcludeTrailingPathDelimiter(Trim(APaths[I]));
+    if P = '' then
+      Continue;
+    if Result <> '' then
+      Result := Result + ';';
+    Result := Result + P;
+  end;
+end;
+
+function IsIdentByte(ACh: Char): Boolean; inline;
+begin
+  Result :=
+    ((ACh >= 'A') and (ACh <= 'Z')) or
+    ((ACh >= 'a') and (ACh <= 'z')) or
+    ((ACh >= '0') and (ACh <= '9')) or
+    (ACh = '_');
+end;
+
+function IsPosBefore(const A, B: TLspPosition): Boolean; inline;
+begin
+  Result := (A.Line < B.Line) or ((A.Line = B.Line) and (A.Character < B.Character));
+end;
+
+procedure NormalizeContainingRange(const ASelRange: TLspRange; var AFullRange: TLspRange);
+begin
+  if IsPosBefore(AFullRange.EndPos, AFullRange.StartPos) then
+    AFullRange.EndPos := AFullRange.StartPos;
+  if IsPosBefore(ASelRange.StartPos, AFullRange.StartPos) then
+    AFullRange.StartPos := ASelRange.StartPos;
+  if IsPosBefore(AFullRange.EndPos, ASelRange.EndPos) then
+    AFullRange.EndPos := ASelRange.EndPos;
+end;
+
+function ObtainCodeBuffer(const AFilePath: string; ALoadFromDisk: Boolean): TCodeBuffer;
+var
+  ExpPath: string;
+begin
+  Result := nil;
+  if Trim(AFilePath) = '' then
+    Exit;
+
+  ExpPath := ExpandFileName(NormalizeNativeSeparators(AFilePath));
+  Result := CodeToolBoss.FindFile(ExpPath);
+  if (Result <> nil) and (not Result.IsDeleted) then
+    Exit;
+
+  if ALoadFromDisk and FileExists(ExpPath) then
+    Result := CodeToolBoss.LoadFile(ExpPath, False, False)
+  else if not ALoadFromDisk then
+  begin
+    Result := CodeToolBoss.CreateFile(ExpPath);
+    if Result <> nil then
+      Result.IsDeleted := False;
+  end;
+end;
+
+function LspPosToCodeXY(ABuf: TCodeBuffer; ADoc: TLspDocument;
+  const APos: TLspPosition; out AX, AY: Integer): Boolean;
+var
+  Line0: Integer;
+  LineStr: string;
+begin
+  AX := 1;
+  AY := 1;
+  if ABuf = nil then
+    Exit(False);
+
+  Line0 := APos.Line;
+  if Line0 < 0 then
+    Line0 := 0;
+
+  if ADoc <> nil then
+    LineStr := ADoc.GetLineText(Line0)
+  else if (Line0 >= 0) and (Line0 < ABuf.LineCount) then
+    LineStr := ABuf.GetLine(Line0, False)
+  else
+    LineStr := '';
+
+  AY := Line0 + 1;
+  if (ABuf.LineCount > 0) and (AY > ABuf.LineCount) then
+    AY := ABuf.LineCount;
+
+  AX := Utf16ColToByteIndex(LineStr, APos.Character);
+  if AX < 1 then
+    AX := 1;
+  Result := True;
+end;
+
+function CodeXYIdentifierRange(ABuf: TCodeBuffer; AX, AY: Integer): TLspRange;
+var
+  Line0, StartByte, EndByte, Len: Integer;
+  LineStr: string;
+begin
+  if (ABuf = nil) or (AY < 1) then
+    Exit(TLspRange.SingleLine(0, 0, 0));
+
+  Line0 := AY - 1;
+  if Line0 < ABuf.LineCount then
+    LineStr := ABuf.GetLine(Line0, False)
+  else
+    LineStr := '';
+
+  Len := Length(LineStr);
+  StartByte := AX;
+  if StartByte < 1 then
+    StartByte := 1;
+  if StartByte > Len + 1 then
+    StartByte := Len + 1;
+
+  // Skip leading '&' on escaped Pascal identifiers
+  if (StartByte <= Len) and (LineStr[StartByte] = '&') and
+     (StartByte + 1 <= Len) and IsIdentByte(LineStr[StartByte + 1]) then
+    EndByte := StartByte + 1
+  else
+    EndByte := StartByte;
+
+  while (EndByte <= Len) and IsIdentByte(LineStr[EndByte]) do
+    Inc(EndByte);
+
+  Result := TLspRange.SingleLine(
+    Line0,
+    ByteIndexToUtf16Col(LineStr, StartByte),
+    ByteIndexToUtf16Col(LineStr, EndByte)
+  );
+end;
+
+function CleanPosSpanToLspRange(ATool: TCodeTool; ABuf: TCodeBuffer;
+  AStartCleanPos, AEndCleanPos: Integer; out ARange: TLspRange): Boolean;
+var
+  StartCaret, EndCaret: TCodeXYPosition;
+  StartLineStr, EndLineStr: string;
+  EndPosAdj: Integer;
+begin
+  ARange := TLspRange.SingleLine(0, 0, 0);
+  if (ATool = nil) or (ABuf = nil) or (AStartCleanPos < 1) then
+    Exit(False);
+
+  if not ATool.CleanPosToCaret(AStartCleanPos, StartCaret) then
+    Exit(False);
+  if StartCaret.Code <> ABuf then
+    Exit(False);
+
+  EndPosAdj := AEndCleanPos;
+  if EndPosAdj < AStartCleanPos then
+    EndPosAdj := AStartCleanPos;
+
+  if (not ATool.CleanPosToCaret(EndPosAdj, EndCaret)) or (EndCaret.Code <> ABuf) then
+    EndCaret := StartCaret;
+
+  if (StartCaret.Y >= 1) and (StartCaret.Y - 1 < ABuf.LineCount) then
+    StartLineStr := ABuf.GetLine(StartCaret.Y - 1, False)
+  else
+    StartLineStr := '';
+
+  if (EndCaret.Y >= 1) and (EndCaret.Y - 1 < ABuf.LineCount) then
+    EndLineStr := ABuf.GetLine(EndCaret.Y - 1, False)
+  else
+    EndLineStr := '';
+
+  ARange := TLspRange.Create(
+    TLspPosition.Create(StartCaret.Y - 1, ByteIndexToUtf16Col(StartLineStr, StartCaret.X)),
+    TLspPosition.Create(EndCaret.Y - 1, ByteIndexToUtf16Col(EndLineStr, EndCaret.X))
+  );
+  Result := True;
+end;
+
+function CleanCommentBody(const ARawComment: string): string;
+var
+  Body, L: string;
   Lines: TStringList;
   I: Integer;
-  L: string;
 begin
-  Result := Trim(ARaw);
-  if Result = '' then
-    Exit('');
-  // Ignore compiler directives {$...}
-  if (Result[1] = '$') then
-    Exit('');
+  Result := '';
+  Body := Trim(ARawComment);
+  if Body = '' then
+    Exit;
+
+  if (Length(Body) >= 2) and (Body[1] = '/') and (Body[2] = '/') then
+  begin
+    if (Length(Body) >= 3) and (Body[3] = '/') then
+      Body := Copy(Body, 4, MaxInt)
+    else
+      Body := Copy(Body, 3, MaxInt);
+    Exit(Trim(Body));
+  end;
+
+  if Body[1] = '{' then
+  begin
+    if (Length(Body) >= 2) and (Body[2] = '$') then
+      Exit('');
+    if Body[Length(Body)] = '}' then
+      Body := Copy(Body, 2, Length(Body) - 2)
+    else
+      Body := Copy(Body, 2, MaxInt);
+  end
+  else if (Length(Body) >= 2) and (Body[1] = '(') and (Body[2] = '*') then
+  begin
+    if (Length(Body) >= 3) and (Body[3] = '$') then
+      Exit('');
+    if (Length(Body) >= 4) and (Body[Length(Body) - 1] = '*') and (Body[Length(Body)] = ')') then
+      Body := Copy(Body, 3, Length(Body) - 4)
+    else
+      Body := Copy(Body, 3, MaxInt);
+  end;
 
   Lines := TStringList.Create;
   try
-    Lines.Text := Result;
-    Result := '';
+    Lines.Text := Trim(Body);
     for I := 0 to Lines.Count - 1 do
     begin
       L := Trim(Lines[I]);
@@ -152,1186 +377,639 @@ begin
   end;
 end;
 
-procedure TokenizePascal(const AText: string; out ATokens: TTokenArray);
+function ExtractPasDocForCodeXY(ABuf: TCodeBuffer; AX, AY: Integer): string;
 var
-  Len, PosIdx, LineNum, CurColUtf16, TokStart, Count, Cap, BlankLines: Integer;
-  PendingDoc, CommentBody: string;
-  Ch: Char;
-
-  procedure StepChar; inline;
-  var
-    B0: Byte;
-    Rem: Integer;
-  begin
-    B0 := Byte(AText[PosIdx]);
-    if B0 < $80 then
-    begin
-      Inc(PosIdx);
-      Inc(CurColUtf16);
-      Exit;
-    end;
-    Rem := Len - PosIdx + 1;
-    if ((B0 and $E0) = $C0) and (Rem >= 2) then
-    begin
-      Inc(PosIdx, 2);
-      Inc(CurColUtf16);
-    end
-    else if ((B0 and $F0) = $E0) and (Rem >= 3) then
-    begin
-      Inc(PosIdx, 3);
-      Inc(CurColUtf16);
-    end
-    else if ((B0 and $F8) = $F0) and (Rem >= 4) then
-    begin
-      Inc(PosIdx, 4);
-      Inc(CurColUtf16, 2);
-    end
-    else
-    begin
-      Inc(PosIdx);
-      Inc(CurColUtf16);
-    end;
-  end;
-
-  procedure StepAscii(ACount: Integer = 1); inline;
-  begin
-    Inc(PosIdx, ACount);
-    Inc(CurColUtf16, ACount);
-  end;
-
-  procedure PushToken(AKind: TTokKind; const AVal: string; ALine, AStartCol, AEndCol: Integer);
-  begin
-    if Count >= Cap then
-    begin
-      Cap := Cap * 2;
-      SetLength(ATokens, Cap);
-    end;
-    ATokens[Count].Kind := AKind;
-    ATokens[Count].Text := AVal;
-    ATokens[Count].Lower := LowerCase(AVal);
-    ATokens[Count].Line := ALine;
-    ATokens[Count].StartCol := AStartCol;
-    ATokens[Count].EndCol := AEndCol;
-    ATokens[Count].PrecedingDoc := PendingDoc;
-    PendingDoc := '';
-    BlankLines := 0;
-    Inc(Count);
-  end;
-
-  procedure AdvanceNewline; inline;
-  begin
-    if (PosIdx <= Len) and (AText[PosIdx] = #13) then
-    begin
-      Inc(PosIdx);
-      if (PosIdx <= Len) and (AText[PosIdx] = #10) then
-        Inc(PosIdx);
-    end
-    else if (PosIdx <= Len) and (AText[PosIdx] = #10) then
-      Inc(PosIdx);
-    Inc(LineNum);
-    CurColUtf16 := 0;
-  end;
-
-var
-  StartLine, StartCol, EndCol: Integer;
+  CommentPosList: TFPList;
+  I, StartPos, EndPos: Integer;
+  PosItem: PCodeXYPosition;
+  CBuf: TCodeBuffer;
+  NestedComments: Boolean;
+  RawPiece, CleanPiece: string;
 begin
-  ATokens := nil;
-  Len := Length(AText);
-  Cap := 256;
-  SetLength(ATokens, Cap);
-  Count := 0;
-  PosIdx := 1;
-  LineNum := 0;
-  CurColUtf16 := 0;
-  PendingDoc := '';
-  BlankLines := 0;
+  Result := '';
+  if (ABuf = nil) or (AX < 1) or (AY < 1) then
+    Exit;
 
-  while PosIdx <= Len do
-  begin
-    Ch := AText[PosIdx];
+  CommentPosList := nil;
+  try
+    if not CodeToolBoss.GetPasDocComments(ABuf, AX, AY, CommentPosList) then
+      Exit;
+    if (CommentPosList = nil) or (CommentPosList.Count = 0) then
+      Exit;
 
-    // Whitespace & line breaks
-    if (Ch = #13) or (Ch = #10) then
+    NestedComments := CodeToolBoss.GetNestedCommentsFlagForFile(ABuf.Filename);
+    for I := 0 to CommentPosList.Count - 1 do
     begin
-      AdvanceNewline;
-      Inc(BlankLines);
-      if BlankLines > 2 then
-        PendingDoc := '';
-      Continue;
-    end;
-
-    if Ch in [' ', #9, #11, #12] then
-    begin
-      StepAscii(1);
-      Continue;
-    end;
-
-    // Line comment // or ///
-    if (Ch = '/') and (PosIdx + 1 <= Len) and (AText[PosIdx + 1] = '/') then
-    begin
-      StepAscii(2);
-      if (PosIdx <= Len) and (AText[PosIdx] = '/') then
-        StepAscii(1);
-      TokStart := PosIdx;
-      while (PosIdx <= Len) and (AText[PosIdx] <> #13) and (AText[PosIdx] <> #10) do
-        StepChar;
-      CommentBody := Trim(Copy(AText, TokStart, PosIdx - TokStart));
-      if CommentBody <> '' then
+      PosItem := PCodeXYPosition(CommentPosList[I]);
+      if (PosItem = nil) or (PosItem^.Code = nil) then
+        Continue;
+      CBuf := PosItem^.Code;
+      CBuf.LineColToPosition(PosItem^.Y, PosItem^.X, StartPos);
+      if (StartPos < 1) or (StartPos > CBuf.SourceLength) then
+        Continue;
+      EndPos := FindCommentEnd(CBuf.Source, StartPos, NestedComments);
+      RawPiece := Copy(CBuf.Source, StartPos, EndPos - StartPos);
+      CleanPiece := CleanCommentBody(RawPiece);
+      if CleanPiece <> '' then
       begin
-        if PendingDoc <> '' then
-          PendingDoc := PendingDoc + #10 + CommentBody
-        else
-          PendingDoc := CommentBody;
+        if Result <> '' then
+          Result := Result + #10;
+        Result := Result + CleanPiece;
       end;
-      BlankLines := 0;
-      Continue;
     end;
-
-    // Brace comment { ... }
-    if Ch = '{' then
-    begin
-      StepAscii(1);
-      TokStart := PosIdx;
-      while (PosIdx <= Len) and (AText[PosIdx] <> '}') do
-      begin
-        if (AText[PosIdx] = #13) or (AText[PosIdx] = #10) then
-          AdvanceNewline
-        else
-          StepChar;
-      end;
-      CommentBody := CleanCommentText(Copy(AText, TokStart, PosIdx - TokStart));
-      if PosIdx <= Len then
-        StepAscii(1);
-      if CommentBody <> '' then
-        PendingDoc := CommentBody;
-      BlankLines := 0;
-      Continue;
-    end;
-
-    // Paren-star comment (* ... *)
-    if (Ch = '(') and (PosIdx + 1 <= Len) and (AText[PosIdx + 1] = '*') then
-    begin
-      StepAscii(2);
-      TokStart := PosIdx;
-      while PosIdx <= Len do
-      begin
-        if (AText[PosIdx] = '*') and (PosIdx + 1 <= Len) and (AText[PosIdx + 1] = ')') then
-          Break;
-        if (AText[PosIdx] = #13) or (AText[PosIdx] = #10) then
-          AdvanceNewline
-        else
-          StepChar;
-      end;
-      CommentBody := CleanCommentText(Copy(AText, TokStart, PosIdx - TokStart));
-      if PosIdx + 1 <= Len then
-        StepAscii(2)
-      else
-        PosIdx := Len + 1;
-      if CommentBody <> '' then
-        PendingDoc := CommentBody;
-      BlankLines := 0;
-      Continue;
-    end;
-
-    // String literal '...'
-    if Ch = '''' then
-    begin
-      StartLine := LineNum;
-      StartCol := CurColUtf16;
-      TokStart := PosIdx;
-      StepAscii(1);
-      while PosIdx <= Len do
-      begin
-        if (AText[PosIdx] = #13) or (AText[PosIdx] = #10) then
-          Break;
-        if AText[PosIdx] = '''' then
-        begin
-          StepAscii(1);
-          if (PosIdx <= Len) and (AText[PosIdx] = '''') then
-            StepAscii(1)
-          else
-            Break;
-        end
-        else
-          StepChar;
-      end;
-      EndCol := CurColUtf16;
-      PushToken(ttkString, Copy(AText, TokStart, PosIdx - TokStart), StartLine, StartCol, EndCol);
-      Continue;
-    end;
-
-    // Identifier (including escaped &ident)
-    if IsIdentStart(Ch) or ((Ch = '&') and (PosIdx + 1 <= Len) and IsIdentStart(AText[PosIdx + 1])) then
-    begin
-      StartLine := LineNum;
-      StartCol := CurColUtf16;
-      if Ch = '&' then
-        StepAscii(1);
-      TokStart := PosIdx;
-      while (PosIdx <= Len) and IsIdentCont(AText[PosIdx]) do
-        StepAscii(1);
-      EndCol := CurColUtf16;
-      PushToken(ttkIdent, Copy(AText, TokStart, PosIdx - TokStart), StartLine, StartCol, EndCol);
-      Continue;
-    end;
-
-    // Numbers ($hex, %bin, &oct, decimal)
-    if (Ch in ['0'..'9']) or ((Ch = '$') and (PosIdx + 1 <= Len) and (AText[PosIdx + 1] in ['0'..'9', 'A'..'F', 'a'..'f'])) then
-    begin
-      StartLine := LineNum;
-      StartCol := CurColUtf16;
-      TokStart := PosIdx;
-      StepAscii(1);
-      while (PosIdx <= Len) and (AText[PosIdx] in ['0'..'9', 'A'..'F', 'a'..'f', '_']) do
-        StepAscii(1);
-      EndCol := CurColUtf16;
-      PushToken(ttkNumber, Copy(AText, TokStart, PosIdx - TokStart), StartLine, StartCol, EndCol);
-      Continue;
-    end;
-
-    // Multi-char or single-char punctuation
-    StartLine := LineNum;
-    StartCol := CurColUtf16;
-    if (PosIdx + 1 <= Len) and
-       (((Ch = ':') and (AText[PosIdx + 1] = '=')) or
-        ((Ch = '<') and (AText[PosIdx + 1] in ['=', '>'])) or
-        ((Ch = '>') and (AText[PosIdx + 1] = '=')) or
-        ((Ch = '.') and (AText[PosIdx + 1] = '.'))) then
-    begin
-      PushToken(ttkSymbol, Copy(AText, PosIdx, 2), StartLine, StartCol, StartCol + 2);
-      StepAscii(2);
-    end
-    else
-    begin
-      PushToken(ttkSymbol, Ch, StartLine, StartCol, StartCol + 1);
-      StepChar;
-    end;
+  finally
+    if CommentPosList <> nil then
+      CodeToolBoss.FreeListOfPCodeXYPosition(CommentPosList);
   end;
-
-  if Count >= Cap then
-    SetLength(ATokens, Count + 1);
-  ATokens[Count].Kind := ttkEof;
-  ATokens[Count].Text := '';
-  ATokens[Count].Lower := '';
-  ATokens[Count].Line := LineNum;
-  ATokens[Count].StartCol := 0;
-  ATokens[Count].EndCol := 0;
-  Inc(Count);
-  SetLength(ATokens, Count);
 end;
 
-function ParsePascalSourceSymbols(const AUri, AFilePath, AText: string): TPasIndexedFile;
-type
-  TDeclSection = (dsNone, dsType, dsConst, dsVar);
+procedure SplitParameterStrings(const AParamsText: string; out AParams: TLspStringArray);
 var
-  Toks: TTokenArray;
-  Idx, SymCount: Integer;
-  InInterface: Boolean;
-  CurSection: TDeclSection;
+  I, ParenDepth, StartIdx: Integer;
+  Ch: Char;
+  InQuote: Boolean;
+  Piece: string;
+begin
+  AParams := nil;
+  if Trim(AParamsText) = '' then
+    Exit;
 
-  function Cur: TToken; inline;
+  ParenDepth := 0;
+  InQuote := False;
+  StartIdx := 1;
+  for I := 1 to Length(AParamsText) do
   begin
-    if Idx <= High(Toks) then
-      Result := Toks[Idx]
-    else
-      Result := Toks[High(Toks)];
-  end;
-
-  function Peek(AOffset: Integer): TToken; inline;
-  begin
-    if (Idx + AOffset >= 0) and (Idx + AOffset <= High(Toks)) then
-      Result := Toks[Idx + AOffset]
-    else
-      Result := Toks[High(Toks)];
-  end;
-
-var
-  ResultObj: TPasIndexedFile;
-
-  function PushSymbol(const AName, AContainer, ADetail, ASig, ADoc: string;
-    AKind: TLspSymbolKind; ACompKind: TLspCompletionItemKind;
-    AParentIdx: Integer; const ASelRange, AFullRange: TLspRange;
-    const AParams: TLspStringArray): Integer;
-  begin
-    Result := SymCount;
-    Inc(SymCount);
-    SetLength(ResultObj.Symbols, SymCount);
-    ResultObj.Symbols[Result].Name := AName;
-    ResultObj.Symbols[Result].NameLower := LowerCase(AName);
-    ResultObj.Symbols[Result].ContainerName := AContainer;
-    ResultObj.Symbols[Result].Detail := ADetail;
-    ResultObj.Symbols[Result].Signature := ASig;
-    ResultObj.Symbols[Result].DocComment := ADoc;
-    ResultObj.Symbols[Result].Params := AParams;
-    ResultObj.Symbols[Result].Kind := AKind;
-    ResultObj.Symbols[Result].CompletionKind := ACompKind;
-    ResultObj.Symbols[Result].IsInterfaceSection := InInterface;
-    ResultObj.Symbols[Result].ParentSymbolIndex := AParentIdx;
-    ResultObj.Symbols[Result].SelectionRange := ASelRange;
-    ResultObj.Symbols[Result].Range := AFullRange;
-  end;
-
-  function ReadDottedIdent(out AStartTok, AEndTok: TToken): string;
-  begin
-    Result := '';
-    AStartTok := Cur;
-    AEndTok := Cur;
-    if Cur.Kind <> ttkIdent then
-      Exit;
-    Result := Cur.Text;
-    AEndTok := Cur;
-    Inc(Idx);
-    while (Cur.Text = '.') and (Peek(1).Kind = ttkIdent) do
+    Ch := AParamsText[I];
+    if Ch = '''' then
+      InQuote := not InQuote
+    else if not InQuote then
     begin
-      Inc(Idx); // '.'
-      Result := Result + '.' + Cur.Text;
-      AEndTok := Cur;
-      Inc(Idx);
-    end;
-  end;
-
-  procedure SkipToSemicolon;
-  var
-    ParenDepth: Integer;
-  begin
-    ParenDepth := 0;
-    while Cur.Kind <> ttkEof do
-    begin
-      if (Cur.Text = '(') or (Cur.Text = '[') then
+      if (Ch = '(') or (Ch = '[') or (Ch = '<') then
         Inc(ParenDepth)
-      else if (Cur.Text = ')') or (Cur.Text = ']') then
+      else if (Ch = ')') or (Ch = ']') or (Ch = '>') then
       begin
         if ParenDepth > 0 then
           Dec(ParenDepth);
       end
-      else if (ParenDepth = 0) and (Cur.Text = ';') then
+      else if (ParenDepth = 0) and (Ch = ';') then
       begin
-        Inc(Idx);
-        Break;
-      end
-      else if (ParenDepth = 0) and
-              ((Cur.Lower = 'implementation') or (Cur.Lower = 'begin') or
-               (Cur.Lower = 'end') or (Cur.Lower = 'initialization') or
-               (Cur.Lower = 'finalization')) then
-        Break;
-      Inc(Idx);
+        Piece := Trim(Copy(AParamsText, StartIdx, I - StartIdx));
+        if Piece <> '' then
+        begin
+          SetLength(AParams, Length(AParams) + 1);
+          AParams[High(AParams)] := Piece;
+        end;
+        StartIdx := I + 1;
+      end;
     end;
   end;
 
-  procedure SkipRoutineBodyIfPresent;
-  var
-    BlockDepth: Integer;
+  Piece := Trim(Copy(AParamsText, StartIdx, MaxInt));
+  if Piece <> '' then
   begin
-    // Skip routine modifiers (overload; virtual; inline; etc.) until either 'begin'/'asm' or next top-level keyword
-    while Cur.Kind <> ttkEof do
-    begin
-      if (Cur.Lower = 'overload') or (Cur.Lower = 'virtual') or (Cur.Lower = 'override') or
-         (Cur.Lower = 'abstract') or (Cur.Lower = 'reintroduce') or (Cur.Lower = 'inline') or
-         (Cur.Lower = 'static') or (Cur.Lower = 'cdecl') or (Cur.Lower = 'stdcall') or
-         (Cur.Lower = 'register') or (Cur.Lower = 'safecall') or (Cur.Lower = 'noreturn') or
-         (Cur.Lower = 'public') or (Cur.Lower = 'deprecated') or (Cur.Lower = 'platform') or
-         (Cur.Lower = 'experimental') then
-      begin
-        SkipToSemicolon;
-        Continue;
-      end;
-
-      if (Cur.Lower = 'forward') or (Cur.Lower = 'external') then
-      begin
-        SkipToSemicolon;
-        Exit;
-      end;
-
-      Break;
-    end;
-
-    if InInterface then
-      Exit;
-
-    // In implementation/program, skip local var/const/type/nested procs + begin..end;
-    while (Cur.Kind <> ttkEof) and
-          ((Cur.Lower = 'var') or (Cur.Lower = 'const') or (Cur.Lower = 'type') or
-           (Cur.Lower = 'resourcestring') or (Cur.Lower = 'label')) do
-    begin
-      Inc(Idx);
-      while (Cur.Kind <> ttkEof) and (Cur.Lower <> 'begin') and (Cur.Lower <> 'asm') and
-            (Cur.Lower <> 'procedure') and (Cur.Lower <> 'function') and
-            (Cur.Lower <> 'constructor') and (Cur.Lower <> 'destructor') do
-      begin
-        if (Cur.Lower = 'record') or (Cur.Lower = 'case') then
-        begin
-          Inc(Idx);
-          BlockDepth := 1;
-          while (Cur.Kind <> ttkEof) and (BlockDepth > 0) do
-          begin
-            if (Cur.Lower = 'record') or (Cur.Lower = 'case') then
-              Inc(BlockDepth)
-            else if Cur.Lower = 'end' then
-              Dec(BlockDepth);
-            Inc(Idx);
-          end;
-        end
-        else
-          Inc(Idx);
-      end;
-    end;
-
-    if (Cur.Lower = 'begin') or (Cur.Lower = 'asm') then
-    begin
-      BlockDepth := 1;
-      Inc(Idx);
-      while (Cur.Kind <> ttkEof) and (BlockDepth > 0) do
-      begin
-        if (Cur.Lower = 'begin') or (Cur.Lower = 'try') or (Cur.Lower = 'case') or (Cur.Lower = 'asm') then
-          Inc(BlockDepth)
-        else if Cur.Lower = 'end' then
-          Dec(BlockDepth);
-        Inc(Idx);
-      end;
-      if Cur.Text = ';' then
-        Inc(Idx);
-    end;
+    SetLength(AParams, Length(AParams) + 1);
+    AParams[High(AParams)] := Piece;
   end;
+end;
 
-  procedure ParseRoutineDeclaration(AParentStructIdx: Integer; const AOwnerTypeName, ALeadingPrefix: string);
-  var
-    KwTok, NameTok, EndSigTok: TToken;
-    Kw, ProcName, Container, SigText, ParamAccum, RetType, Doc: string;
-    Params: TLspStringArray;
-    ParenDepth: Integer;
-    SymKind: TLspSymbolKind;
-    CompKind: TLspCompletionItemKind;
-    SelRange, FullRange: TLspRange;
-  begin
-    KwTok := Cur;
-    Kw := KwTok.Lower;
-    Doc := KwTok.PrecedingDoc;
-    Inc(Idx);
-
-    // Optional 'generic' before function name is handled before calling, or handle here
-    if Cur.Kind <> ttkIdent then
-    begin
-      SkipToSemicolon;
-      Exit;
-    end;
-
-    Container := AOwnerTypeName;
-    NameTok := Cur;
-    ProcName := Cur.Text;
-    Inc(Idx);
-
-    // Qualified method implementation: TMyClass.MyMethod
-    if (Cur.Text = '.') and (Peek(1).Kind = ttkIdent) then
-    begin
-      Container := ProcName;
-      Inc(Idx); // '.'
-      NameTok := Cur;
-      ProcName := Cur.Text;
-      Inc(Idx);
-    end;
-
-    // Optional generic <T>
-    if Cur.Text = '<' then
-    begin
-      ParenDepth := 1;
-      Inc(Idx);
-      while (Cur.Kind <> ttkEof) and (ParenDepth > 0) do
-      begin
-        if Cur.Text = '<' then Inc(ParenDepth)
-        else if Cur.Text = '>' then Dec(ParenDepth);
-        Inc(Idx);
-      end;
-    end;
-
-    Params := nil;
-    SigText := Trim(ALeadingPrefix + ' ' + Kw + ' ');
-    if Container <> '' then
-      SigText := SigText + Container + '.' + ProcName
-    else
-      SigText := SigText + ProcName;
-
-    // Parameter list (...)
-    if Cur.Text = '(' then
-    begin
-      SigText := SigText + '(';
-      Inc(Idx);
-      ParenDepth := 1;
-      ParamAccum := '';
-      while (Cur.Kind <> ttkEof) and (ParenDepth > 0) do
-      begin
-        if Cur.Text = '(' then
-        begin
-          Inc(ParenDepth);
-          ParamAccum := ParamAccum + '(';
-        end
-        else if Cur.Text = ')' then
-        begin
-          Dec(ParenDepth);
-          if ParenDepth > 0 then
-            ParamAccum := ParamAccum + ')'
-          else
-          begin
-            if Trim(ParamAccum) <> '' then
-              AppendStr(Params, Trim(ParamAccum));
-          end;
-        end
-        else if (ParenDepth = 1) and (Cur.Text = ';') then
-        begin
-          if Trim(ParamAccum) <> '' then
-            AppendStr(Params, Trim(ParamAccum));
-          SigText := SigText + Trim(ParamAccum) + '; ';
-          ParamAccum := '';
-        end
-        else
-        begin
-          if (ParamAccum <> '') and (Cur.Text <> ':') and (Cur.Text <> ',') and
-             (ParamAccum[Length(ParamAccum)] <> '(') and (ParamAccum[Length(ParamAccum)] <> '[') then
-            ParamAccum := ParamAccum + ' ';
-          ParamAccum := ParamAccum + Cur.Text;
-        end;
-        Inc(Idx);
-      end;
-      if Trim(ParamAccum) <> '' then
-        SigText := SigText + Trim(ParamAccum);
-      SigText := SigText + ')';
-    end;
-
-    // Return type ': TResult'
-    RetType := '';
-    if (Cur.Text = ':') then
-    begin
-      Inc(Idx);
-      while (Cur.Kind <> ttkEof) and (Cur.Text <> ';') do
-      begin
-        if (RetType <> '') and (Cur.Text <> '.') and (RetType[Length(RetType)] <> '.') then
-          RetType := RetType + ' ';
-        RetType := RetType + Cur.Text;
-        Inc(Idx);
-      end;
-      if RetType <> '' then
-        SigText := SigText + ': ' + RetType;
-    end;
-
-    EndSigTok := Peek(-1);
-    if Cur.Text = ';' then
-    begin
-      EndSigTok := Cur;
-      Inc(Idx);
-    end;
-
-    if Kw = 'constructor' then
-    begin
-      SymKind := lskConstructor;
-      CompKind := lcikConstructor;
-    end
-    else if (Container <> '') or (AParentStructIdx >= 0) then
-    begin
-      SymKind := lskMethod;
-      CompKind := lcikMethod;
-    end
-    else
-    begin
-      SymKind := lskFunction;
-      CompKind := lcikFunction;
-    end;
-
-    SelRange := TLspRange.SingleLine(NameTok.Line, NameTok.StartCol, NameTok.EndCol);
-    FullRange := TLspRange.Create(
-      TLspPosition.Create(KwTok.Line, KwTok.StartCol),
-      TLspPosition.Create(EndSigTok.Line, EndSigTok.EndCol)
-    );
-
-    PushSymbol(ProcName, Container, RetType, SigText + ';', Doc,
-      SymKind, CompKind, AParentStructIdx, SelRange, FullRange, Params);
-
-    if AParentStructIdx < 0 then
-      SkipRoutineBodyIfPresent;
-  end;
-
-  procedure ParseStructuredTypeMembers(AParentIdx: Integer; const ATypeName: string);
-  var
-    MemberTok, TypeTok: TToken;
-    FieldNames: array of TToken;
-    I: Integer;
-    FieldType, Doc: string;
-    EmptyParams: TLspStringArray;
-  begin
-    EmptyParams := nil;
-    while (Cur.Kind <> ttkEof) and (Cur.Lower <> 'end') do
-    begin
-      // Visibility specifiers
-      if (Cur.Lower = 'private') or (Cur.Lower = 'protected') or (Cur.Lower = 'public') or
-         (Cur.Lower = 'published') then
-      begin
-        Inc(Idx);
-        Continue;
-      end;
-      if (Cur.Lower = 'strict') and ((Peek(1).Lower = 'private') or (Peek(1).Lower = 'protected')) then
-      begin
-        Inc(Idx, 2);
-        Continue;
-      end;
-
-      if Cur.Lower = 'class' then
-      begin
-        if (Peek(1).Lower = 'function') or (Peek(1).Lower = 'procedure') or
-           (Peek(1).Lower = 'constructor') or (Peek(1).Lower = 'destructor') then
-        begin
-          Inc(Idx); // 'class'
-          ParseRoutineDeclaration(AParentIdx, ATypeName, 'class');
-          Continue;
-        end;
-        Inc(Idx);
-        Continue;
-      end;
-
-      if (Cur.Lower = 'procedure') or (Cur.Lower = 'function') or
-         (Cur.Lower = 'constructor') or (Cur.Lower = 'destructor') then
-      begin
-        ParseRoutineDeclaration(AParentIdx, ATypeName, '');
-        Continue;
-      end;
-
-      if Cur.Lower = 'property' then
-      begin
-        Doc := Cur.PrecedingDoc;
-        Inc(Idx);
-        if Cur.Kind = ttkIdent then
-        begin
-          MemberTok := Cur;
-          Inc(Idx);
-          FieldType := '';
-          if Cur.Text = '[' then
-          begin
-            while (Cur.Kind <> ttkEof) and (Cur.Text <> ']') do
-              Inc(Idx);
-            if Cur.Text = ']' then
-              Inc(Idx);
-          end;
-          if Cur.Text = ':' then
-          begin
-            Inc(Idx);
-            if Cur.Kind = ttkIdent then
-              FieldType := Cur.Text;
-          end;
-          SkipToSemicolon;
-          PushSymbol(
-            MemberTok.Text, ATypeName, FieldType,
-            'property ' + ATypeName + '.' + MemberTok.Text + ': ' + FieldType,
-            Doc, lskProperty, lcikProperty, AParentIdx,
-            TLspRange.SingleLine(MemberTok.Line, MemberTok.StartCol, MemberTok.EndCol),
-            TLspRange.SingleLine(MemberTok.Line, MemberTok.StartCol, MemberTok.EndCol),
-            EmptyParams
-          );
-        end
-        else
-          SkipToSemicolon;
-        Continue;
-      end;
-
-      // Field declarations: FName1, FName2: TType;
-      if (Cur.Kind = ttkIdent) and ((Peek(1).Text = ':') or (Peek(1).Text = ',')) then
-      begin
-        Doc := Cur.PrecedingDoc;
-        FieldNames := nil;
-        while Cur.Kind = ttkIdent do
-        begin
-          SetLength(FieldNames, Length(FieldNames) + 1);
-          FieldNames[High(FieldNames)] := Cur;
-          Inc(Idx);
-          if Cur.Text = ',' then
-            Inc(Idx)
-          else
-            Break;
-        end;
-        FieldType := '';
-        if Cur.Text = ':' then
-        begin
-          Inc(Idx);
-          TypeTok := Cur;
-          if TypeTok.Kind = ttkIdent then
-            FieldType := TypeTok.Text;
-        end;
-        SkipToSemicolon;
-        for I := 0 to High(FieldNames) do
-        begin
-          PushSymbol(
-            FieldNames[I].Text, ATypeName, FieldType,
-            FieldNames[I].Text + ': ' + FieldType,
-            Doc, lskField, lcikField, AParentIdx,
-            TLspRange.SingleLine(FieldNames[I].Line, FieldNames[I].StartCol, FieldNames[I].EndCol),
-            TLspRange.SingleLine(FieldNames[I].Line, FieldNames[I].StartCol, FieldNames[I].EndCol),
-            EmptyParams
-          );
-        end;
-        Continue;
-      end;
-
-      // Skip nested case/var/const/other tokens inside record/class safely
-      if Cur.Lower = 'case' then
-      begin
-        SkipToSemicolon;
-        Continue;
-      end;
-
-      Inc(Idx);
-    end;
-
-    // Update parent full range end to 'end'
-    if (AParentIdx >= 0) and (AParentIdx < Length(ResultObj.Symbols)) and (Cur.Lower = 'end') then
-    begin
-      ResultObj.Symbols[AParentIdx].Range.EndPos := TLspPosition.Create(Cur.Line, Cur.EndCol);
-      Inc(Idx); // 'end'
-      if Cur.Text = ';' then
-        Inc(Idx);
-    end;
-  end;
-
-  procedure ParseTypeDeclaration;
-  var
-    NameTok, KwTok, EnumTok: TToken;
-    TypeName, Doc, KindDetail: string;
-    SymKind: TLspSymbolKind;
-    CompKind: TLspCompletionItemKind;
-    StructIdx, ParenDepth: Integer;
-    EmptyParams: TLspStringArray;
-  begin
-    EmptyParams := nil;
-    Doc := Cur.PrecedingDoc;
-    if Cur.Lower = 'generic' then
-      Inc(Idx);
-    if Cur.Kind <> ttkIdent then
-    begin
-      Inc(Idx);
-      Exit;
-    end;
-
-    NameTok := Cur;
-    TypeName := NameTok.Text;
-    Inc(Idx);
-
-    // Optional generic <T>
-    if Cur.Text = '<' then
-    begin
-      ParenDepth := 1;
-      Inc(Idx);
-      while (Cur.Kind <> ttkEof) and (ParenDepth > 0) do
-      begin
-        if Cur.Text = '<' then Inc(ParenDepth)
-        else if Cur.Text = '>' then Dec(ParenDepth);
-        Inc(Idx);
-      end;
-    end;
-
-    if Cur.Text <> '=' then
-    begin
-      SkipToSemicolon;
-      Exit;
-    end;
-    Inc(Idx); // '='
-
-    if Cur.Lower = 'packed' then
-      Inc(Idx);
-
-    KwTok := Cur;
-
-    // Enum type: TMyEnum = (evOne, evTwo);
-    if KwTok.Text = '(' then
-    begin
-      StructIdx := PushSymbol(
-        TypeName, '', 'enum', 'type ' + TypeName + ' = (...)', Doc,
-        lskEnum, lcikEnum, -1,
-        TLspRange.SingleLine(NameTok.Line, NameTok.StartCol, NameTok.EndCol),
-        TLspRange.SingleLine(NameTok.Line, NameTok.StartCol, NameTok.EndCol),
-        EmptyParams
-      );
-      Inc(Idx); // '('
-      while (Cur.Kind <> ttkEof) and (Cur.Text <> ')') do
-      begin
-        if Cur.Kind = ttkIdent then
-        begin
-          EnumTok := Cur;
-          PushSymbol(
-            EnumTok.Text, TypeName, TypeName, EnumTok.Text + ': ' + TypeName, '',
-            lskEnumMember, lcikEnumMember, StructIdx,
-            TLspRange.SingleLine(EnumTok.Line, EnumTok.StartCol, EnumTok.EndCol),
-            TLspRange.SingleLine(EnumTok.Line, EnumTok.StartCol, EnumTok.EndCol),
-            EmptyParams
-          );
-          Inc(Idx);
-          while (Cur.Kind <> ttkEof) and (Cur.Text <> ',') and (Cur.Text <> ')') do
-            Inc(Idx);
-        end
-        else
-          Inc(Idx);
-        if Cur.Text = ',' then
-          Inc(Idx);
-      end;
-      if Cur.Text = ')' then
-      begin
-        ResultObj.Symbols[StructIdx].Range.EndPos := TLspPosition.Create(Cur.Line, Cur.EndCol);
-        Inc(Idx);
-      end;
-      if Cur.Text = ';' then
-        Inc(Idx);
-      Exit;
-    end;
-
-    // Class / Record / Interface / Object
-    if (KwTok.Lower = 'class') or (KwTok.Lower = 'record') or
-       (KwTok.Lower = 'interface') or (KwTok.Lower = 'object') then
-    begin
-      // Forward declaration 'TMyClass = class;' or 'class of ...'
-      if (KwTok.Lower = 'class') and ((Peek(1).Text = ';') or (Peek(1).Lower = 'of')) then
-      begin
-        SkipToSemicolon;
-        PushSymbol(
-          TypeName, '', 'class reference', 'type ' + TypeName, Doc,
-          lskClass, lcikClass, -1,
-          TLspRange.SingleLine(NameTok.Line, NameTok.StartCol, NameTok.EndCol),
-          TLspRange.SingleLine(NameTok.Line, NameTok.StartCol, NameTok.EndCol),
-          EmptyParams
-        );
-        Exit;
-      end;
-
-      if KwTok.Lower = 'record' then
-      begin
-        SymKind := lskStruct;
-        CompKind := lcikStruct;
-        KindDetail := 'record';
-      end
-      else if KwTok.Lower = 'interface' then
-      begin
-        SymKind := lskInterface;
-        CompKind := lcikInterface;
-        KindDetail := 'interface';
-      end
-      else
-      begin
-        SymKind := lskClass;
-        CompKind := lcikClass;
-        KindDetail := KwTok.Lower;
-      end;
-
-      Inc(Idx); // 'class' / 'record' / 'interface'
-
-      // Optional ancestor list (...) and GUID [...]
-      if Cur.Text = '(' then
-      begin
-        ParenDepth := 1;
-        Inc(Idx);
-        while (Cur.Kind <> ttkEof) and (ParenDepth > 0) do
-        begin
-          if Cur.Text = '(' then Inc(ParenDepth)
-          else if Cur.Text = ')' then Dec(ParenDepth);
-          Inc(Idx);
-        end;
-      end;
-      if Cur.Text = '[' then
-      begin
-        while (Cur.Kind <> ttkEof) and (Cur.Text <> ']') do
-          Inc(Idx);
-        if Cur.Text = ']' then
-          Inc(Idx);
-      end;
-
-      // Empty class definition without members: TMyErr = class(Exception);
-      if Cur.Text = ';' then
-      begin
-        PushSymbol(
-          TypeName, '', KindDetail, 'type ' + TypeName + ' = ' + KindDetail, Doc,
-          SymKind, CompKind, -1,
-          TLspRange.SingleLine(NameTok.Line, NameTok.StartCol, NameTok.EndCol),
-          TLspRange.Create(TLspPosition.Create(NameTok.Line, NameTok.StartCol), TLspPosition.Create(Cur.Line, Cur.EndCol)),
-          EmptyParams
-        );
-        Inc(Idx);
-        Exit;
-      end;
-
-      StructIdx := PushSymbol(
-        TypeName, '', KindDetail, 'type ' + TypeName + ' = ' + KindDetail, Doc,
-        SymKind, CompKind, -1,
-        TLspRange.SingleLine(NameTok.Line, NameTok.StartCol, NameTok.EndCol),
-        TLspRange.SingleLine(NameTok.Line, NameTok.StartCol, NameTok.EndCol),
-        EmptyParams
-      );
-      ParseStructuredTypeMembers(StructIdx, TypeName);
-      Exit;
-    end;
-
-    // Alias / array / pointer / procedural type
-    KindDetail := KwTok.Text;
-    SkipToSemicolon;
-    PushSymbol(
-      TypeName, '', KindDetail, 'type ' + TypeName + ' = ' + KindDetail, Doc,
-      lskClass, lcikTypeParameter, -1,
-      TLspRange.SingleLine(NameTok.Line, NameTok.StartCol, NameTok.EndCol),
-      TLspRange.SingleLine(NameTok.Line, NameTok.StartCol, NameTok.EndCol),
-      EmptyParams
-    );
-  end;
-
-  procedure ParseConstDeclaration;
-  var
-    NameTok: TToken;
-    Doc, ValPreview: string;
-    EmptyParams: TLspStringArray;
-  begin
-    EmptyParams := nil;
-    if Cur.Kind <> ttkIdent then
-    begin
-      Inc(Idx);
-      Exit;
-    end;
-    Doc := Cur.PrecedingDoc;
-    NameTok := Cur;
-    Inc(Idx);
-    ValPreview := '';
-    if (Cur.Text = ':') or (Cur.Text = '=') then
-    begin
-      while (Cur.Kind <> ttkEof) and (Cur.Text <> ';') do
-      begin
-        if Length(ValPreview) < 60 then
-        begin
-          if ValPreview <> '' then
-            ValPreview := ValPreview + ' ';
-          ValPreview := ValPreview + Cur.Text;
-        end;
-        Inc(Idx);
-      end;
-    end;
-    if Cur.Text = ';' then
-      Inc(Idx);
-    PushSymbol(
-      NameTok.Text, '', ValPreview, 'const ' + NameTok.Text + ' ' + ValPreview, Doc,
-      lskConstant, lcikConstant, -1,
-      TLspRange.SingleLine(NameTok.Line, NameTok.StartCol, NameTok.EndCol),
-      TLspRange.SingleLine(NameTok.Line, NameTok.StartCol, NameTok.EndCol),
-      EmptyParams
-    );
-  end;
-
-  procedure ParseVarDeclaration;
-  var
-    Names: array of TToken;
-    Doc, VarType: string;
-    I: Integer;
-    EmptyParams: TLspStringArray;
-  begin
-    EmptyParams := nil;
-    if Cur.Kind <> ttkIdent then
-    begin
-      Inc(Idx);
-      Exit;
-    end;
-    Doc := Cur.PrecedingDoc;
-    Names := nil;
-    while Cur.Kind = ttkIdent do
-    begin
-      SetLength(Names, Length(Names) + 1);
-      Names[High(Names)] := Cur;
-      Inc(Idx);
-      if Cur.Text = ',' then
-        Inc(Idx)
-      else
-        Break;
-    end;
-    VarType := '';
-    if Cur.Text = ':' then
-    begin
-      Inc(Idx);
-      if Cur.Kind = ttkIdent then
-        VarType := Cur.Text;
-    end;
-    SkipToSemicolon;
-    for I := 0 to High(Names) do
-    begin
-      PushSymbol(
-        Names[I].Text, '', VarType, 'var ' + Names[I].Text + ': ' + VarType, Doc,
-        lskVariable, lcikVariable, -1,
-        TLspRange.SingleLine(Names[I].Line, Names[I].StartCol, Names[I].EndCol),
-        TLspRange.SingleLine(Names[I].Line, Names[I].StartCol, Names[I].EndCol),
-        EmptyParams
-      );
-    end;
-  end;
-
+procedure ExtractDocumentSymbolsFromBuffer(ABuf: TCodeBuffer;
+  out ADocSymbols: TLspDocumentSymbolArray;
+  out AWorkspaceSymbols: TPasWorkspaceSymbolArray;
+  out AModuleName: string;
+  out AUsedUnits: TLspStringArray);
 var
-  HeaderStart, HeaderEnd: TToken;
-  UsedUnitName: string;
-  MainBlockDepth: Integer;
-begin
-  ResultObj := TPasIndexedFile.Create;
-  ResultObj.Uri := AUri;
-  ResultObj.NormalizedKey := LowerCase(NormalizeDocumentUri(AUri));
-  ResultObj.FilePath := AFilePath;
-  if AFilePath <> '' then
-    ResultObj.ModuleName := ChangeFileExt(ExtractFileName(AFilePath), '');
-  ResultObj.ModuleNameLower := LowerCase(ResultObj.ModuleName);
-  SymCount := 0;
+  Tool: TCodeTool;
+  DocSymCount, WsSymCount: Integer;
+  MainUses, ImplUses: TStrings;
+  UIdx: Integer;
 
-  TokenizePascal(AText, Toks);
-  Idx := 0;
-  InInterface := True;
-  CurSection := dsNone;
-
-  // Optional unit / program / library header
-  if (Cur.Lower = 'unit') or (Cur.Lower = 'program') or (Cur.Lower = 'library') then
+  function PushDocAndWsSymbol(const AName, AContainer, ADetail: string;
+    AKind: TLspSymbolKind; AParentIdx: Integer;
+    const ASelRange: TLspRange; AFullRange: TLspRange): Integer;
   begin
-    if Cur.Lower <> 'unit' then
-      InInterface := False;
-    Inc(Idx);
-    UsedUnitName := ReadDottedIdent(HeaderStart, HeaderEnd);
-    if UsedUnitName <> '' then
-    begin
-      ResultObj.ModuleName := UsedUnitName;
-      ResultObj.ModuleNameLower := LowerCase(UsedUnitName);
-    end;
-    SkipToSemicolon;
+    if Trim(AName) = '' then
+      Exit(-1);
+    NormalizeContainingRange(ASelRange, AFullRange);
+
+    Result := DocSymCount;
+    Inc(DocSymCount);
+    SetLength(ADocSymbols, DocSymCount);
+    ADocSymbols[Result].ParentIndex := AParentIdx;
+    ADocSymbols[Result].Name := AName;
+    ADocSymbols[Result].Detail := ADetail;
+    ADocSymbols[Result].Kind := AKind;
+    ADocSymbols[Result].Range := AFullRange;
+    ADocSymbols[Result].SelectionRange := ASelRange;
+
+    Inc(WsSymCount);
+    SetLength(AWorkspaceSymbols, WsSymCount);
+    AWorkspaceSymbols[WsSymCount - 1].Name := AName;
+    AWorkspaceSymbols[WsSymCount - 1].NameLower := LowerCase(AName);
+    AWorkspaceSymbols[WsSymCount - 1].ContainerName := AContainer;
+    AWorkspaceSymbols[WsSymCount - 1].Kind := AKind;
+    AWorkspaceSymbols[WsSymCount - 1].SelectionRange := ASelRange;
   end;
 
-  while Cur.Kind <> ttkEof do
+  function NodeNameSelRange(ANode: TCodeTreeNode; ACleanNamePos: Integer): TLspRange;
+  var
+    Caret: TCodeXYPosition;
   begin
-    if Cur.Lower = 'interface' then
+    if (ACleanNamePos < 1) and (ANode <> nil) then
+      ACleanNamePos := ANode.StartPos;
+    if Tool.CleanPosToCaret(ACleanNamePos, Caret) and (Caret.Code = ABuf) then
+      Result := CodeXYIdentifierRange(ABuf, Caret.X, Caret.Y)
+    else
+      Result := TLspRange.SingleLine(0, 0, 0);
+  end;
+
+  procedure WalkNodeList(AFirstNode: TCodeTreeNode; AParentIdx: Integer;
+    const AContainerName: string; AInsideStructuredType: Boolean); forward;
+
+  procedure HandleTypeDefNode(ATypeDefNode: TCodeTreeNode; AParentIdx: Integer;
+    const AContainerName: string);
+  var
+    TypeName, DetailStr: string;
+    SubNode, MemberChild: TCodeTreeNode;
+    FullRange, SelRange: TLspRange;
+    SymKind: TLspSymbolKind;
+    StructIdx, NamePos: Integer;
+    NameNode: TCodeTreeNode;
+  begin
+    if not CleanPosSpanToLspRange(Tool, ABuf, ATypeDefNode.StartPos, ATypeDefNode.EndPos, FullRange) then
+      Exit;
+
+    TypeName := Trim(Tool.ExtractDefinitionName(ATypeDefNode));
+    if TypeName = '' then
+      Exit;
+
+    NameNode := Tool.FindDefinitionNameNode(ATypeDefNode);
+    if NameNode <> nil then
+      NamePos := NameNode.StartPos
+    else
+      NamePos := ATypeDefNode.StartPos;
+    SelRange := NodeNameSelRange(ATypeDefNode, NamePos);
+
+    SubNode := ATypeDefNode.FirstChild;
+    while (SubNode <> nil) and
+          ((SubNode.Desc = ctnGenericName) or (SubNode.Desc = ctnGenericParams) or
+           (SubNode.Desc = ctnAttribute)) do
+      SubNode := SubNode.NextBrother;
+
+    if SubNode = nil then
     begin
-      InInterface := True;
-      CurSection := dsNone;
-      Inc(Idx);
-      Continue;
+      PushDocAndWsSymbol(TypeName, AContainerName, 'type', lskClass, AParentIdx, SelRange, FullRange);
+      Exit;
     end;
 
-    if Cur.Lower = 'implementation' then
-    begin
-      InInterface := False;
-      CurSection := dsNone;
-      Inc(Idx);
-      Continue;
-    end;
-
-    if Cur.Lower = 'uses' then
-    begin
-      CurSection := dsNone;
-      Inc(Idx);
-      while (Cur.Kind <> ttkEof) and (Cur.Text <> ';') do
-      begin
-        if Cur.Kind = ttkIdent then
+    case SubNode.Desc of
+      ctnClass, ctnObject, ctnObjCClass, ctnCPPClass,
+      ctnClassHelper, ctnRecordHelper, ctnTypeHelper,
+      ctnRecordType, ctnClassInterface, ctnDispinterface, ctnObjCProtocol:
         begin
-          UsedUnitName := ReadDottedIdent(HeaderStart, HeaderEnd);
-          AppendStr(ResultObj.UsedUnits, UsedUnitName);
-          if Cur.Lower = 'in' then
+          if (SubNode.SubDesc and ctnsForwardDeclaration) <> 0 then
           begin
-            Inc(Idx);
-            if Cur.Kind = ttkString then
-              Inc(Idx);
+            PushDocAndWsSymbol(TypeName, AContainerName, 'forward', lskClass, AParentIdx, SelRange, FullRange);
+            Exit;
           end;
-        end
-        else
-          Inc(Idx);
-        if Cur.Text = ',' then
-          Inc(Idx);
-      end;
-      if Cur.Text = ';' then
-        Inc(Idx);
-      Continue;
-    end;
 
-    if (Cur.Lower = 'initialization') or (Cur.Lower = 'finalization') or (Cur.Lower = 'begin') then
-    begin
-      // Skip module main/init block
-      CurSection := dsNone;
-      MainBlockDepth := 1;
-      Inc(Idx);
-      while (Cur.Kind <> ttkEof) and (MainBlockDepth > 0) do
+          case SubNode.Desc of
+            ctnRecordType:
+              begin
+                SymKind := lskStruct;
+                DetailStr := 'record';
+              end;
+            ctnClassInterface, ctnDispinterface, ctnObjCProtocol:
+              begin
+                SymKind := lskInterface;
+                DetailStr := 'interface';
+              end;
+          else
+            begin
+              SymKind := lskClass;
+              DetailStr := 'class';
+            end;
+          end;
+
+          StructIdx := PushDocAndWsSymbol(TypeName, AContainerName, DetailStr, SymKind,
+            AParentIdx, SelRange, FullRange);
+          if StructIdx >= 0 then
+            WalkNodeList(SubNode.FirstChild, StructIdx, TypeName, True);
+        end;
+
+      ctnEnumerationType:
+        begin
+          StructIdx := PushDocAndWsSymbol(TypeName, AContainerName, 'enum', lskEnum,
+            AParentIdx, SelRange, FullRange);
+          if StructIdx >= 0 then
+          begin
+            MemberChild := SubNode.FirstChild;
+            while MemberChild <> nil do
+            begin
+              if MemberChild.Desc = ctnEnumIdentifier then
+              begin
+                if CleanPosSpanToLspRange(Tool, ABuf, MemberChild.StartPos, MemberChild.EndPos, FullRange) then
+                begin
+                  SelRange := NodeNameSelRange(MemberChild, MemberChild.StartPos);
+                  PushDocAndWsSymbol(
+                    GetIdentifier(@Tool.Src[MemberChild.StartPos]),
+                    TypeName, TypeName, lskEnumMember, StructIdx, SelRange, FullRange
+                  );
+                end;
+              end;
+              MemberChild := MemberChild.NextBrother;
+            end;
+          end;
+        end;
+    else
       begin
-        if (Cur.Lower = 'begin') or (Cur.Lower = 'try') or (Cur.Lower = 'case') or (Cur.Lower = 'asm') then
-          Inc(MainBlockDepth)
-        else if Cur.Lower = 'end' then
-          Dec(MainBlockDepth);
-        Inc(Idx);
-      end;
-      if Cur.Text = '.' then
-        Break;
-      Continue;
-    end;
-
-    if Cur.Lower = 'type' then
-    begin
-      CurSection := dsType;
-      Inc(Idx);
-      Continue;
-    end;
-
-    if (Cur.Lower = 'const') or (Cur.Lower = 'resourcestring') then
-    begin
-      CurSection := dsConst;
-      Inc(Idx);
-      Continue;
-    end;
-
-    if (Cur.Lower = 'var') or (Cur.Lower = 'threadvar') then
-    begin
-      CurSection := dsVar;
-      Inc(Idx);
-      Continue;
-    end;
-
-    if (Cur.Lower = 'generic') and
-       ((Peek(1).Lower = 'function') or (Peek(1).Lower = 'procedure')) then
-    begin
-      CurSection := dsNone;
-      Inc(Idx); // 'generic'
-      ParseRoutineDeclaration(-1, '', 'generic');
-      Continue;
-    end;
-
-    if (Cur.Lower = 'class') and
-       ((Peek(1).Lower = 'function') or (Peek(1).Lower = 'procedure') or
-        (Peek(1).Lower = 'constructor') or (Peek(1).Lower = 'destructor')) then
-    begin
-      CurSection := dsNone;
-      Inc(Idx); // 'class'
-      ParseRoutineDeclaration(-1, '', 'class');
-      Continue;
-    end;
-
-    if (Cur.Lower = 'procedure') or (Cur.Lower = 'function') or
-       (Cur.Lower = 'constructor') or (Cur.Lower = 'destructor') then
-    begin
-      CurSection := dsNone;
-      ParseRoutineDeclaration(-1, '', '');
-      Continue;
-    end;
-
-    if (Cur.Kind = ttkIdent) or (Cur.Lower = 'generic') then
-    begin
-      case CurSection of
-        dsType:
-          begin
-            ParseTypeDeclaration;
-            Continue;
-          end;
-        dsConst:
-          begin
-            ParseConstDeclaration;
-            Continue;
-          end;
-        dsVar:
-          begin
-            ParseVarDeclaration;
-            Continue;
-          end;
-        dsNone: ;
-      else
-        raise ENikError.CreateFmt('Unexpected TDeclSection ordinal: %d', [Ord(CurSection)]);
+        DetailStr := Trim(Tool.ExtractDefinitionNodeType(ATypeDefNode));
+        if DetailStr = '' then
+          DetailStr := 'type';
+        PushDocAndWsSymbol(TypeName, AContainerName, DetailStr, lskClass, AParentIdx, SelRange, FullRange);
       end;
     end;
-
-    Inc(Idx);
   end;
 
-  Result := ResultObj;
+  procedure HandleProcNode(AProcNode: TCodeTreeNode; AParentIdx: Integer;
+    const AContainerName: string; AInsideStructuredType: Boolean);
+  var
+    ProcName, RetType, OwnerClass: string;
+    FullRange, SelRange: TLspRange;
+    HeadEndPos, NameCleanPos: Integer;
+    SymKind: TLspSymbolKind;
+  begin
+    if AProcNode.FirstChild <> nil then
+      HeadEndPos := AProcNode.FirstChild.EndPos
+    else
+      HeadEndPos := AProcNode.EndPos;
+
+    if not CleanPosSpanToLspRange(Tool, ABuf, AProcNode.StartPos, AProcNode.EndPos, FullRange) then
+      if not CleanPosSpanToLspRange(Tool, ABuf, AProcNode.StartPos, HeadEndPos, FullRange) then
+        Exit;
+
+    if AInsideStructuredType then
+    begin
+      ProcName := Trim(Tool.ExtractProcName(AProcNode, [phpWithoutClassName]));
+      OwnerClass := AContainerName;
+    end
+    else
+    begin
+      ProcName := Trim(Tool.ExtractProcName(AProcNode, []));
+      OwnerClass := Trim(Tool.ExtractClassNameOfProcNode(AProcNode, True, False));
+    end;
+
+    if ProcName = '' then
+      Exit;
+
+    Tool.MoveCursorToProcName(AProcNode, AInsideStructuredType);
+    NameCleanPos := Tool.CurPos.StartPos;
+    SelRange := NodeNameSelRange(AProcNode, NameCleanPos);
+
+    RetType := Trim(Tool.ExtractFuncResultType(AProcNode, [phpWithoutSemicolon]));
+    if (Length(RetType) > 0) and (RetType[1] = ':') then
+      RetType := Trim(Copy(RetType, 2, MaxInt));
+
+    if Tool.NodeIsConstructor(AProcNode) then
+      SymKind := lskConstructor
+    else if AInsideStructuredType or (OwnerClass <> '') then
+      SymKind := lskMethod
+    else
+      SymKind := lskFunction;
+
+    PushDocAndWsSymbol(ProcName, OwnerClass, RetType, SymKind, AParentIdx, SelRange, FullRange);
+  end;
+
+  procedure WalkNodeList(AFirstNode: TCodeTreeNode; AParentIdx: Integer;
+    const AContainerName: string; AInsideStructuredType: Boolean);
+  var
+    Node: TCodeTreeNode;
+    FullRange, SelRange: TLspRange;
+    SymName, SymDetail: string;
+    SymKind: TLspSymbolKind;
+    NameNode: TCodeTreeNode;
+    NamePos: Integer;
+  begin
+    Node := AFirstNode;
+    while Node <> nil do
+    begin
+      case Node.Desc of
+        ctnProgram, ctnUnit, ctnLibrary, ctnPackage,
+        ctnInterface, ctnImplementation,
+        ctnTypeSection, ctnVarSection, ctnConstSection, ctnResStrSection,
+        ctnPropertySection,
+        ctnClassPrivate, ctnClassProtected, ctnClassPublic, ctnClassPublished,
+        ctnClassRequired, ctnClassOptional, ctnClassClassVar,
+        ctnRecordCase, ctnRecordVariant:
+          WalkNodeList(Node.FirstChild, AParentIdx, AContainerName, AInsideStructuredType);
+
+        ctnTypeDefinition, ctnGenericType:
+          HandleTypeDefNode(Node, AParentIdx, AContainerName);
+
+        ctnProcedure:
+          HandleProcNode(Node, AParentIdx, AContainerName, AInsideStructuredType);
+
+        ctnProperty, ctnGlobalProperty:
+          begin
+            if CleanPosSpanToLspRange(Tool, ABuf, Node.StartPos, Node.EndPos, FullRange) then
+            begin
+              SymName := Trim(Tool.ExtractPropName(Node, False));
+              SymDetail := Trim(Tool.ExtractPropType(Node, False, False));
+              if Tool.MoveCursorToPropName(Node) then
+                NamePos := Tool.CurPos.StartPos
+              else
+                NamePos := Node.StartPos;
+              SelRange := NodeNameSelRange(Node, NamePos);
+              PushDocAndWsSymbol(SymName, AContainerName, SymDetail, lskProperty,
+                AParentIdx, SelRange, FullRange);
+            end;
+          end;
+
+        ctnVarDefinition:
+          begin
+            if CleanPosSpanToLspRange(Tool, ABuf, Node.StartPos, Node.EndPos, FullRange) then
+            begin
+              SymName := Trim(Tool.ExtractDefinitionName(Node));
+              SymDetail := Trim(Tool.ExtractDefinitionNodeType(Node));
+              NameNode := Tool.FindDefinitionNameNode(Node);
+              if NameNode <> nil then
+                NamePos := NameNode.StartPos
+              else
+                NamePos := Node.StartPos;
+              SelRange := NodeNameSelRange(Node, NamePos);
+              if AInsideStructuredType then
+                SymKind := lskField
+              else
+                SymKind := lskVariable;
+              PushDocAndWsSymbol(SymName, AContainerName, SymDetail, SymKind,
+                AParentIdx, SelRange, FullRange);
+            end;
+          end;
+
+        ctnConstDefinition:
+          begin
+            if CleanPosSpanToLspRange(Tool, ABuf, Node.StartPos, Node.EndPos, FullRange) then
+            begin
+              SymName := Trim(Tool.ExtractDefinitionName(Node));
+              SymDetail := 'const';
+              SelRange := NodeNameSelRange(Node, Node.StartPos);
+              PushDocAndWsSymbol(SymName, AContainerName, SymDetail, lskConstant,
+                AParentIdx, SelRange, FullRange);
+            end;
+          end;
+      else
+        // Skip executable statements, uses nodes, attributes, etc.
+      end;
+      Node := Node.NextBrother;
+    end;
+  end;
+
+begin
+  ADocSymbols := nil;
+  AWorkspaceSymbols := nil;
+  AModuleName := '';
+  AUsedUnits := nil;
+  DocSymCount := 0;
+  WsSymCount := 0;
+
+  if ABuf = nil then
+    Exit;
+
+  AModuleName := ChangeFileExt(ExtractFileName(ABuf.Filename), '');
+
+  MainUses := nil;
+  ImplUses := nil;
+  try
+    if CodeToolBoss.FindUsedUnitNames(ABuf, MainUses, ImplUses) then
+    begin
+      if MainUses <> nil then
+        for UIdx := 0 to MainUses.Count - 1 do
+          AppendUniqueStr(AUsedUnits, MainUses[UIdx]);
+      if ImplUses <> nil then
+        for UIdx := 0 to ImplUses.Count - 1 do
+          AppendUniqueStr(AUsedUnits, ImplUses[UIdx]);
+    end;
+  finally
+    MainUses.Free;
+    ImplUses.Free;
+  end;
+
+  Tool := nil;
+  CodeToolBoss.Explore(ABuf, Tool, False, False);
+  if (Tool = nil) or (Tool.Tree = nil) or (Tool.Tree.Root = nil) then
+    Exit;
+
+  if Trim(Tool.GetSourceName(False)) <> '' then
+    AModuleName := Trim(Tool.GetSourceName(False));
+
+  WalkNodeList(Tool.Tree.Root, -1, '', False);
+end;
+
+function MapIdentItemKind(AItem: TIdentifierListItem; out ACompKind: TLspCompletionItemKind): Boolean;
+var
+  Desc: TCodeTreeNodeDesc;
+begin
+  Result := True;
+  if AItem = nil then
+    Exit(False);
+
+  if iliKeyword in AItem.Flags then
+  begin
+    ACompKind := lcikKeyword;
+    Exit;
+  end;
+
+  Desc := AItem.GetDesc;
+  case Desc of
+    ctnProcedure, ctnProcedureHead:
+      begin
+        if AItem.IsConstructor then
+          ACompKind := lcikConstructor
+        else if (AItem.Node <> nil) and (AItem.Tool <> nil) and AItem.Tool.NodeIsInAMethod(AItem.Node) then
+          ACompKind := lcikMethod
+        else
+          ACompKind := lcikFunction;
+      end;
+    ctnProperty, ctnGlobalProperty:
+      ACompKind := lcikProperty;
+    ctnVarDefinition:
+      begin
+        if (AItem.Node <> nil) and (AItem.Node.Parent <> nil) and
+           (AItem.Node.Parent.Desc in (AllClassSections + [ctnRecordType, ctnRecordCase, ctnRecordVariant])) then
+          ACompKind := lcikField
+        else
+          ACompKind := lcikVariable;
+      end;
+    ctnConstDefinition, ctnConstant:
+      ACompKind := lcikConstant;
+    ctnEnumIdentifier:
+      ACompKind := lcikEnumMember;
+    ctnEnumerationType:
+      ACompKind := lcikEnum;
+    ctnRecordType:
+      ACompKind := lcikStruct;
+    ctnClassInterface, ctnDispinterface, ctnObjCProtocol:
+      ACompKind := lcikInterface;
+    ctnClass, ctnObject, ctnObjCClass, ctnCPPClass,
+    ctnClassHelper, ctnRecordHelper, ctnTypeHelper,
+    ctnTypeDefinition, ctnGenericType:
+      ACompKind := lcikClass;
+    ctnUnit, ctnProgram, ctnLibrary, ctnPackage,
+    ctnUseUnit, ctnUseUnitNamespace, ctnUseUnitClearName:
+      ACompKind := lcikModule;
+  else
+    ACompKind := lcikText;
+  end;
+end;
+
+function FormatPascalDeclaration(const ARaw: string): string;
+var
+  Trimmed, Beautified, OutBuf: string;
+  OldLineLen, I, Len: Integer;
+  InQuote: Boolean;
+  Ch, PrevCh, NextCh: Char;
+begin
+  Trimmed := Trim(ARaw);
+  if Trimmed = '' then
+    Exit('');
+
+  if (CodeToolBoss <> nil) and (CodeToolBoss.SourceChangeCache <> nil) and
+     (CodeToolBoss.Beautifier <> nil) then
+  begin
+    OldLineLen := CodeToolBoss.Beautifier.LineLength;
+    try
+      CodeToolBoss.Beautifier.LineLength := MaxInt;
+      Beautified := Trim(CodeToolBoss.Beautifier.BeautifyStatement(
+        Trimmed, 0, [bcfDoNotIndentFirstLine], 1
+      ));
+    finally
+      CodeToolBoss.Beautifier.LineLength := OldLineLen;
+    end;
+  end
+  else
+    Beautified := Trimmed;
+
+  // Normalize spaces around standalone '=' (e.g. default parameters 'AQuantity: Integer=1')
+  // and remove redundant spaces right before ')' or ';' without touching string literals.
+  OutBuf := '';
+  InQuote := False;
+  Len := Length(Beautified);
+  for I := 1 to Len do
+  begin
+    Ch := Beautified[I];
+    if Ch = '''' then
+    begin
+      InQuote := not InQuote;
+      OutBuf := OutBuf + Ch;
+      Continue;
+    end;
+
+    if not InQuote then
+    begin
+      if ((Ch = ')') or (Ch = ';')) and (Length(OutBuf) > 0) and (OutBuf[Length(OutBuf)] = ' ') then
+        Delete(OutBuf, Length(OutBuf), 1);
+
+      if Ch = '=' then
+      begin
+        if Length(OutBuf) > 0 then
+          PrevCh := OutBuf[Length(OutBuf)]
+        else
+          PrevCh := #0;
+        if I < Len then
+          NextCh := Beautified[I + 1]
+        else
+          NextCh := #0;
+
+        if not (PrevCh in [':', '<', '>', '+', '-', '*', '/', ' ']) then
+          OutBuf := OutBuf + ' ';
+        OutBuf := OutBuf + '=';
+        if not (NextCh in ['>', '=', ' ', #0]) then
+          OutBuf := OutBuf + ' ';
+        Continue;
+      end;
+    end;
+
+    OutBuf := OutBuf + Ch;
+  end;
+
+  Result := Trim(OutBuf);
+end;
+
+function BuildIdentItemDetail(AItem: TIdentifierListItem): string;
+var
+  Params, ResType: string;
+begin
+  Result := '';
+  if AItem = nil then
+    Exit;
+  if iliKeyword in AItem.Flags then
+    Exit('keyword');
+
+  case AItem.GetDesc of
+    ctnProcedure, ctnProcedureHead:
+      begin
+        // Prefer extracting directly from the real AST node so original casing,
+        // var/const/out modifiers, default values, and clean spacing are preserved.
+        if (AItem.Node <> nil) and (AItem.Tool <> nil) and (AItem.Node.Desc = ctnProcedure) then
+        begin
+          Result := FormatPascalDeclaration(AItem.Tool.ExtractProcHead(
+            AItem.Node,
+            [phpWithStart, phpWithoutClassName, phpWithVarModifiers,
+             phpWithParameterNames, phpWithDefaultValues, phpWithResultType]
+          ));
+          if Result <> '' then
+            Exit;
+        end;
+
+        Params := Trim(AItem.ParamNameList);
+        if (Length(Params) > 0) and (Params[Length(Params)] = ';') then
+          Params := Trim(Copy(Params, 1, Length(Params) - 1));
+        if (Length(Params) >= 2) and (Params[1] = '(') and (Params[Length(Params)] = ')') then
+          Params := Trim(Copy(Params, 2, Length(Params) - 2));
+
+        ResType := Trim(AItem.ResultType);
+        if AItem.IsConstructor then
+          Result := 'constructor ' + AItem.Identifier
+        else if AItem.IsDestructor then
+          Result := 'destructor ' + AItem.Identifier
+        else if AItem.IsFunction or (ResType <> '') then
+          Result := 'function ' + AItem.Identifier
+        else
+          Result := 'procedure ' + AItem.Identifier;
+
+        if Params <> '' then
+          Result := Result + '(' + Params + ')';
+        if ResType <> '' then
+          Result := Result + ': ' + ResType;
+        Result := FormatPascalDeclaration(Result + ';');
+      end;
+    ctnProperty, ctnGlobalProperty:
+      begin
+        if (AItem.Node <> nil) and (AItem.Tool <> nil) then
+          Result := FormatPascalDeclaration('property ' + AItem.Tool.ExtractProperty(
+            AItem.Node,
+            [phpWithVarModifiers, phpWithParameterNames, phpWithResultType]
+          ))
+        else
+          Result := Trim(AItem.ResultType);
+      end;
+    ctnVarDefinition, ctnConstDefinition:
+      begin
+        ResType := Trim(AItem.ResultType);
+        if (ResType = '') and (AItem.Node <> nil) and (AItem.Tool <> nil) then
+        begin
+          if AItem.GetDesc = ctnVarDefinition then
+            ResType := FormatPascalDeclaration(
+              Trim(AItem.Tool.ExtractDefinitionName(AItem.Node)) + ': ' +
+              Trim(AItem.Tool.ExtractDefinitionNodeType(AItem.Node))
+            )
+          else
+            ResType := FormatPascalDeclaration('const ' + Trim(AItem.Tool.ExtractNode(AItem.Node, [])));
+        end;
+        Result := ResType;
+      end;
+  else
+    Result := Trim(AItem.ResultType);
+  end;
 end;
 
 { TNikSymbolIndex }
@@ -1339,22 +1017,46 @@ end;
 constructor TNikSymbolIndex.Create;
 begin
   inherited Create;
+  SilenceCodeToolsLogger;
   FFiles := TFPList.Create;
   FFileKeyHash := TFPHashList.Create;
-  FSearchDirs := TStringList.Create;
-  FUnitPathsPool := TStringList.Create;
-  FUnitHash := TFPHashList.Create;
+  FCodeToolsReady := False;
 end;
 
 destructor TNikSymbolIndex.Destroy;
 begin
+  if (CodeToolBoss <> nil) and (CodeToolBoss.SourceCache <> nil) then
+    CodeToolBoss.SourceCache.OnDecodeLoaded := nil;
   Clear;
-  FreeAndNil(FUnitHash);
-  FreeAndNil(FUnitPathsPool);
-  FreeAndNil(FSearchDirs);
   FreeAndNil(FFileKeyHash);
   FreeAndNil(FFiles);
   inherited Destroy;
+end;
+
+procedure TNikSymbolIndex.HandleCodeCacheDecodeLoaded(ACode: TObject;
+  const AFilename: string; var ASource, ADiskEncoding, AMemEncoding: string);
+begin
+  if (Length(ASource) >= 3) and
+     (ASource[1] = #$EF) and (ASource[2] = #$BB) and (ASource[3] = #$BF) then
+  begin
+    Delete(ASource, 1, 3);
+    ADiskEncoding := 'UTF-8BOM';
+  end
+  else if ADiskEncoding = '' then
+    ADiskEncoding := 'UTF-8';
+  AMemEncoding := 'UTF-8';
+end;
+
+procedure TNikSymbolIndex.EnsureCodeToolsBaseInitialized;
+begin
+  SilenceCodeToolsLogger;
+  CodeToolBoss.WriteExceptions := False;
+  CodeToolBoss.CatchExceptions := True;
+  CodeToolBoss.IdentComplIncludeKeywords := True;
+  CodeToolBoss.IdentifierList.SortForHistory := False;
+  CodeToolBoss.IdentifierList.SortMethodForCompletion := icsScopedAlphabetic;
+  if CodeToolBoss.SourceCache <> nil then
+    CodeToolBoss.SourceCache.OnDecodeLoaded := TOnCodeCacheDecodeLoaded(@HandleCodeCacheDecodeLoaded);
 end;
 
 procedure TNikSymbolIndex.Clear;
@@ -1365,107 +1067,328 @@ begin
     TObject(FFiles[I]).Free;
   FFiles.Clear;
   FFileKeyHash.Clear;
-  FSearchDirs.Clear;
-  FUnitPathsPool.Clear;
-  FUnitHash.Clear;
 end;
 
-procedure TNikSymbolIndex.SetUnitMapEntry(const AUnitLower, AFullPath: string; AOverwrite: Boolean);
+procedure TNikSymbolIndex.ApplyWorkspaceDefineTemplates(const ADirs, AUnitPaths,
+  AIncludePaths, ADefines, AUndefines: array of string);
 var
-  ExistingIdx, NewIdx: PtrInt;
+  BlockTempl, DirTempl, SubTempl: TDefineTemplate;
+  JoinedUnits, JoinedIncs, DefEntry, DefName, DefVal: string;
+  I, J, EqPos: Integer;
 begin
-  if (AUnitLower = '') or (AFullPath = '') then
-    Exit;
-  ExistingIdx := PtrInt(FUnitHash.Find(AUnitLower));
-  if ExistingIdx > 0 then
+  CodeToolBoss.DefineTree.RemoveRootDefineTemplateByName(NIK_WORKSPACE_TEMPLATE_NAME);
+  if Length(ADirs) = 0 then
   begin
-    if AOverwrite then
-      FUnitPathsPool[ExistingIdx - 1] := AFullPath;
+    CodeToolBoss.DefineTree.ClearCache;
     Exit;
   end;
-  NewIdx := FUnitPathsPool.Add(AFullPath) + 1;
-  FUnitHash.Add(AUnitLower, Pointer(NewIdx));
-end;
 
-function TNikSymbolIndex.GetUnitMapEntry(const AUnitLower: string): string;
-var
-  ExistingIdx: PtrInt;
-begin
-  if AUnitLower = '' then
-    Exit('');
-  ExistingIdx := PtrInt(FUnitHash.Find(AUnitLower));
-  if (ExistingIdx > 0) and (ExistingIdx <= FUnitPathsPool.Count) then
-    Result := FUnitPathsPool[ExistingIdx - 1]
-  else
-    Result := '';
-end;
+  JoinedUnits := JoinSemicolonPaths(AUnitPaths);
+  JoinedIncs  := JoinSemicolonPaths(AIncludePaths);
 
-procedure TNikSymbolIndex.ScanDirectoryForUnits(const ADir: string; AMaxDepth: Integer);
-var
-  SR: TSearchRec;
-  CleanDir, Ext, UnitLower, FullFile: string;
-begin
-  if (ADir = '') or (AMaxDepth < 0) or (not DirectoryExists(ADir)) then
-    Exit;
+  BlockTempl := TDefineTemplate.Create(
+    NIK_WORKSPACE_TEMPLATE_NAME,
+    'Nikrun workspace paths and defines',
+    '', '', da_Block
+  );
 
-  CleanDir := IncludeTrailingPathDelimiter(ADir);
-  if FindFirst(CleanDir + AllFilesMask, faAnyFile, SR) = 0 then
+  for I := Low(ADirs) to High(ADirs) do
   begin
+    if Trim(ADirs[I]) = '' then
+      Continue;
+
+    DirTempl := TDefineTemplate.Create(
+      'NikDir_' + IntToStr(I),
+      ADirs[I],
+      '',
+      ADirs[I],
+      da_Directory
+    );
+
+    if JoinedUnits <> '' then
+    begin
+      SubTempl := TDefineTemplate.Create(
+        'UnitPath', 'UnitPath', UnitPathMacroName,
+        UnitPathMacro + ';' + JoinedUnits, da_DefineRecurse
+      );
+      DirTempl.AddChild(SubTempl);
+    end;
+
+    if JoinedIncs <> '' then
+    begin
+      SubTempl := TDefineTemplate.Create(
+        'IncPath', 'IncPath', IncludePathMacroName,
+        IncludePathMacro + ';' + JoinedIncs, da_DefineRecurse
+      );
+      DirTempl.AddChild(SubTempl);
+    end;
+
+    for J := Low(ADefines) to High(ADefines) do
+    begin
+      DefEntry := Trim(ADefines[J]);
+      if DefEntry = '' then
+        Continue;
+      EqPos := Pos('=', DefEntry);
+      if EqPos > 1 then
+      begin
+        DefName := Trim(Copy(DefEntry, 1, EqPos - 1));
+        DefVal  := Copy(DefEntry, EqPos + 1, MaxInt);
+      end
+      else
+      begin
+        DefName := DefEntry;
+        DefVal  := '1';
+      end;
+      if DefName <> '' then
+      begin
+        SubTempl := TDefineTemplate.Create(
+          'Def_' + DefName, DefName, DefName, DefVal, da_DefineRecurse
+        );
+        DirTempl.AddChild(SubTempl);
+      end;
+    end;
+
+    for J := Low(AUndefines) to High(AUndefines) do
+    begin
+      DefName := Trim(AUndefines[J]);
+      if DefName <> '' then
+      begin
+        SubTempl := TDefineTemplate.Create(
+          'Undef_' + DefName, DefName, DefName, '', da_UndefineRecurse
+        );
+        DirTempl.AddChild(SubTempl);
+      end;
+    end;
+
+    BlockTempl.AddChild(DirTempl);
+  end;
+
+  CodeToolBoss.DefineTree.ReplaceRootSameName(BlockTempl);
+  CodeToolBoss.DefineTree.ClearCache;
+end;
+
+procedure TNikSymbolIndex.ConfigureWorkspace(const AContext: TNikWorkspaceContext;
+  AWorkspaceReady: Boolean; const AFallbackRootDir: string);
+var
+  Opts: TCodeToolsOptions;
+  InstalledSdks: TInstalledSdkArray;
+  FallbackSdk: TInstalledSdk;
+  HasSdk: Boolean;
+  CompilerBin, FpcSrcRoot, TargetOs, TargetCpu, ProjDir, CacheDir: string;
+  ConfigXmlPath, TestUnitPath, FpcOpts: string;
+  ScopeDirs, EffUnitPaths, EffIncPaths: TStringArray;
+  I: Integer;
+
+  procedure AddFpcOpt(const AFlag: string);
+  begin
+    if Trim(AFlag) = '' then
+      Exit;
+    if FpcOpts <> '' then
+      FpcOpts := FpcOpts + ' ';
+    FpcOpts := FpcOpts + QuoteFpcOptIfNeeded(AFlag);
+  end;
+
+begin
+  Clear;
+  EnsureCodeToolsBaseInitialized;
+
+  HasSdk := False;
+  CompilerBin := '';
+  FpcSrcRoot := '';
+  TargetOs := '';
+  TargetCpu := '';
+  ProjDir := '';
+  CacheDir := '';
+  FpcOpts := '';
+  ScopeDirs := nil;
+  EffUnitPaths := nil;
+  EffIncPaths := nil;
+
+  if AWorkspaceReady then
+  begin
+    CompilerBin := AContext.CompilerBinary;
+    FpcSrcRoot  := JoinPath(AContext.Sdk.InstallPath, 'source');
+    TargetOs    := AContext.Sdk.Manifest.TargetOs;
+    TargetCpu   := AContext.Sdk.Manifest.TargetCpu;
+    ProjDir     := AContext.ProjectDir;
+    CacheDir    := AContext.CacheDir;
+    HasSdk      := (CompilerBin <> '') and FileExists(CompilerBin);
+
+    if Trim(AContext.Mode) <> '' then
+      AddFpcOpt('-M' + Trim(AContext.Mode))
+    else
+      AddFpcOpt('-Mobjfpc');
+
+    if AContext.LongStrings then
+      AddFpcOpt('-Sh')
+    else
+      AddFpcOpt('-Sh-');
+
+    for I := 0 to High(AContext.Defines) do
+      if Trim(AContext.Defines[I]) <> '' then
+        AddFpcOpt('-d' + Trim(AContext.Defines[I]));
+    for I := 0 to High(AContext.Undefines) do
+      if Trim(AContext.Undefines[I]) <> '' then
+        AddFpcOpt('-u' + Trim(AContext.Undefines[I]));
+
+    AppendUniqueNativePath(ScopeDirs, ProjDir);
+    for I := 0 to High(AContext.UnitPaths) do
+    begin
+      AppendUniqueNativePath(EffUnitPaths, AContext.UnitPaths[I]);
+      AppendUniqueNativePath(ScopeDirs, AContext.UnitPaths[I]);
+      AddFpcOpt('-Fu' + AContext.UnitPaths[I]);
+    end;
+    for I := 0 to High(AContext.IncludePaths) do
+    begin
+      AppendUniqueNativePath(EffIncPaths, AContext.IncludePaths[I]);
+      AppendUniqueNativePath(ScopeDirs, AContext.IncludePaths[I]);
+      AddFpcOpt('-Fi' + AContext.IncludePaths[I]);
+    end;
+  end
+  else
+  begin
+    ProjDir := Trim(AFallbackRootDir);
+    if (ProjDir <> '') and DirectoryExists(ProjDir) then
+    begin
+      AppendUniqueNativePath(ScopeDirs, ProjDir);
+      AppendUniqueNativePath(EffUnitPaths, ProjDir);
+      AppendUniqueNativePath(EffIncPaths, ProjDir);
+      CacheDir := JoinPath(JoinPath(JoinPath(ProjDir, '.nik'), 'cache'), 'fallback-lsp');
+    end;
+
     try
-      repeat
-        if (SR.Name = '.') or (SR.Name = '..') then
-          Continue;
-        FullFile := CleanDir + SR.Name;
-        if (SR.Attr and faDirectory) <> 0 then
+      InstalledSdks := ListInstalledSdks;
+      for I := High(InstalledSdks) downto 0 do
+      begin
+        FallbackSdk := InstalledSdks[I];
+        CompilerBin := JoinPath(FallbackSdk.InstallPath, FallbackSdk.Manifest.Paths.PpcBinary);
+        if FileExists(CompilerBin) then
         begin
-          if (SR.Name[1] <> '.') and (AMaxDepth > 0) then
-            ScanDirectoryForUnits(FullFile, AMaxDepth - 1);
-        end
-        else
-        begin
-          Ext := LowerCase(ExtractFileExt(SR.Name));
-          if (Ext = '.pas') or (Ext = '.pp') or (Ext = '.dpr') or (Ext = '.lpr') then
-          begin
-            UnitLower := LowerCase(ChangeFileExt(SR.Name, ''));
-            SetUnitMapEntry(UnitLower, FullFile, False);
-          end;
+          FpcSrcRoot := JoinPath(FallbackSdk.InstallPath, 'source');
+          TargetOs   := FallbackSdk.Manifest.TargetOs;
+          TargetCpu  := FallbackSdk.Manifest.TargetCpu;
+          HasSdk     := True;
+          Break;
         end;
-      until FindNext(SR) <> 0;
+      end;
+    except
+      HasSdk := False;
+    end;
+    AddFpcOpt('-Mobjfpc');
+    AddFpcOpt('-Sh');
+  end;
+
+  if HasSdk then
+  begin
+    Opts := TCodeToolsOptions.Create;
+    try
+      ConfigXmlPath := '';
+      if CacheDir <> '' then
+      begin
+        try
+          EnsureDirExists(CacheDir);
+          ConfigXmlPath := JoinPath(CacheDir, 'codetools-config.xml');
+          TestUnitPath  := JoinPath(CacheDir, '_nik_ct_probe.pas');
+          if not FileExists(TestUnitPath) then
+            WriteFileTextUtf8(TestUnitPath, 'unit _nik_ct_probe;' + LineEnding + 'interface' + LineEnding + 'implementation' + LineEnding + 'end.' + LineEnding);
+          if FileExists(ConfigXmlPath) then
+            Opts.LoadFromFile(ConfigXmlPath);
+          Opts.TestPascalFile := TestUnitPath;
+        except
+          ConfigXmlPath := '';
+        end;
+      end;
+
+      Opts.FPCPath         := CompilerBin;
+      if (FpcSrcRoot <> '') and DirectoryExists(FpcSrcRoot) then
+        Opts.FPCSrcDir     := FpcSrcRoot;
+      Opts.TargetOS        := TargetOs;
+      Opts.TargetProcessor := TargetCpu;
+      if ProjDir <> '' then
+        Opts.ProjectDir    := ProjDir;
+      Opts.FPCOptions      := FpcOpts;
+
+      CodeToolBoss.Init(Opts);
+      FCodeToolsReady := True;
+
+      if ConfigXmlPath <> '' then
+      begin
+        try
+          Opts.SaveToFile(ConfigXmlPath);
+        except
+          // Non-fatal if cache directory is read-only
+        end;
+      end;
     finally
-      FindClose(SR);
+      Opts.Free;
     end;
   end;
+
+  if AWorkspaceReady then
+  begin
+    ApplyWorkspaceDefineTemplates(
+      ScopeDirs, EffUnitPaths, EffIncPaths,
+      AContext.Defines, AContext.Undefines
+    );
+    IndexProjectDirectories(EffUnitPaths);
+    if (AContext.EntryPath <> '') and FileExists(AContext.EntryPath) then
+      RefreshDiskFile(AContext.EntryPath);
+  end
+  else
+  begin
+    ApplyWorkspaceDefineTemplates(ScopeDirs, EffUnitPaths, EffIncPaths, [], []);
+    IndexProjectDirectories(EffUnitPaths);
+  end;
 end;
 
-procedure TNikSymbolIndex.RebuildUnitFileMap;
+function TNikSymbolIndex.FindIndexedByKey(const ANormalizedKey: string): Integer;
 var
-  I: Integer;
+  FoundIdx: PtrInt;
 begin
-  FUnitPathsPool.Clear;
-  FUnitHash.Clear;
-  for I := 0 to FSearchDirs.Count - 1 do
-    ScanDirectoryForUnits(FSearchDirs[I], 4);
+  if ANormalizedKey = '' then
+    Exit(-1);
+  FoundIdx := PtrInt(FFileKeyHash.Find(ANormalizedKey));
+  if (FoundIdx > 0) and (FoundIdx <= FFiles.Count) then
+    Result := Integer(FoundIdx - 1)
+  else
+    Result := -1;
 end;
 
-procedure TNikSymbolIndex.ConfigureSearchPaths(const AProjectUnitDirs: array of string;
-  const ARtlSourceDir, APackagesSourceDir: string);
+procedure TNikSymbolIndex.StoreIndexedFile(AParsed: TPasIndexedFile);
 var
-  I: Integer;
+  ExistingIdx: Integer;
 begin
-  FSearchDirs.Clear;
-  for I := Low(AProjectUnitDirs) to High(AProjectUnitDirs) do
-    if (AProjectUnitDirs[I] <> '') and DirectoryExists(AProjectUnitDirs[I]) then
-      FSearchDirs.Add(AProjectUnitDirs[I]);
-
-  if (ARtlSourceDir <> '') and DirectoryExists(ARtlSourceDir) then
-    FSearchDirs.Add(ARtlSourceDir);
-  if (APackagesSourceDir <> '') and DirectoryExists(APackagesSourceDir) then
-    FSearchDirs.Add(APackagesSourceDir);
-
-  RebuildUnitFileMap;
+  if AParsed = nil then
+    Exit;
+  ExistingIdx := FindIndexedByKey(AParsed.NormalizedKey);
+  if ExistingIdx >= 0 then
+  begin
+    TObject(FFiles[ExistingIdx]).Free;
+    FFiles[ExistingIdx] := AParsed;
+  end
+  else
+  begin
+    ExistingIdx := FFiles.Add(AParsed);
+    FFileKeyHash.Add(AParsed.NormalizedKey, Pointer(PtrInt(ExistingIdx + 1)));
+  end;
 end;
 
-procedure TNikSymbolIndex.IndexProjectUnitDirs(const AProjectUnitDirs: array of string);
+procedure TNikSymbolIndex.RemoveIndexedByKey(const ANormalizedKey: string);
+var
+  Idx, I: Integer;
+begin
+  Idx := FindIndexedByKey(ANormalizedKey);
+  if Idx < 0 then
+    Exit;
+
+  TObject(FFiles[Idx]).Free;
+  FFiles.Delete(Idx);
+  FFileKeyHash.Clear;
+  for I := 0 to FFiles.Count - 1 do
+    FFileKeyHash.Add(TPasIndexedFile(FFiles[I]).NormalizedKey, Pointer(PtrInt(I + 1)));
+end;
+
+procedure TNikSymbolIndex.IndexProjectDirectories(const AProjectUnitDirs: array of string);
 const
   MAX_EAGER_PROJECT_FILES = 400;
 var
@@ -1490,7 +1413,7 @@ begin
           Ext := LowerCase(ExtractFileExt(SR.Name));
           if (Ext = '.pas') or (Ext = '.pp') or (Ext = '.lpr') or (Ext = '.dpr') then
           begin
-            IndexDiskFile(CleanDir + SR.Name);
+            RefreshDiskFile(CleanDir + SR.Name);
             Inc(EagerCount);
             if EagerCount >= MAX_EAGER_PROJECT_FILES then
               Break;
@@ -1503,96 +1426,132 @@ begin
   end;
 end;
 
-function TNikSymbolIndex.FindIndexedByKey(const ANormalizedKey: string): Integer;
+function TNikSymbolIndex.SyncOpenDocument(const AUri, AFilePath, ASourceText: string): TPasIndexedFile;
 var
-  FoundIdx: PtrInt;
+  ExpPath, EffUri, ModName: string;
+  Buf: TCodeBuffer;
+  DummyDocSyms: TLspDocumentSymbolArray;
+  WsSyms: TPasWorkspaceSymbolArray;
+  UsedArr: TLspStringArray;
 begin
-  if ANormalizedKey = '' then
-    Exit(-1);
-  FoundIdx := PtrInt(FFileKeyHash.Find(ANormalizedKey));
-  if (FoundIdx > 0) and (FoundIdx <= FFiles.Count) then
-    Result := Integer(FoundIdx - 1)
+  EnsureCodeToolsBaseInitialized;
+  if Trim(AFilePath) <> '' then
+    ExpPath := ExpandFileName(NormalizeNativeSeparators(AFilePath))
   else
-    Result := -1;
-end;
+    ExpPath := ExpandFileName(NormalizeNativeSeparators(UriToFilePath(AUri)));
 
-function TNikSymbolIndex.FindIndexedByUnitLower(const AUnitLower: string): TPasIndexedFile;
-var
-  I: Integer;
-begin
-  for I := 0 to FFiles.Count - 1 do
-    if TPasIndexedFile(FFiles[I]).ModuleNameLower = AUnitLower then
-      Exit(TPasIndexedFile(FFiles[I]));
-  Result := nil;
-end;
-
-function TNikSymbolIndex.EnsureUnitIndexed(const AUnitName: string): TPasIndexedFile;
-var
-  ULower, DiskPath: string;
-begin
-  ULower := LowerCase(Trim(AUnitName));
-  if ULower = '' then
-    Exit(nil);
-  Result := FindIndexedByUnitLower(ULower);
-  if Result <> nil then
-    Exit;
-
-  DiskPath := GetUnitMapEntry(ULower);
-  if (DiskPath <> '') and FileExists(DiskPath) then
-    Result := IndexDiskFile(DiskPath);
-end;
-
-function TNikSymbolIndex.IndexText(const AUri, AFilePath, ASourceText: string): TPasIndexedFile;
-var
-  Parsed: TPasIndexedFile;
-  ExistingIdx: Integer;
-begin
-  Parsed := ParsePascalSourceSymbols(AUri, AFilePath, ASourceText);
-  ExistingIdx := FindIndexedByKey(Parsed.NormalizedKey);
-  if ExistingIdx >= 0 then
-  begin
-    TObject(FFiles[ExistingIdx]).Free;
-    FFiles[ExistingIdx] := Parsed;
-  end
+  if AUri <> '' then
+    EffUri := AUri
   else
+    EffUri := FilePathToUri(ExpPath);
+
+  Buf := ObtainCodeBuffer(ExpPath, False);
+  if Buf <> nil then
   begin
-    ExistingIdx := FFiles.Add(Parsed);
-    FFileKeyHash.Add(Parsed.NormalizedKey, Pointer(PtrInt(ExistingIdx + 1)));
-  end;
-
-  if (Parsed.ModuleNameLower <> '') and (AFilePath <> '') then
-    SetUnitMapEntry(Parsed.ModuleNameLower, AFilePath, True);
-
-  Result := Parsed;
-end;
-
-function TNikSymbolIndex.IndexDiskFile(const AFilePath: string): TPasIndexedFile;
-var
-  FullPath, Uri, RawText: string;
-  FS: TFileStream;
-begin
-  Result := nil;
-  if (AFilePath = '') or (not FileExists(AFilePath)) then
-    Exit;
-  FullPath := ExpandFileName(AFilePath);
-  Uri := FilePathToUri(FullPath);
-  RawText := '';
-  try
-    FS := TFileStream.Create(FullPath, fmOpenRead or fmShareDenyNone);
-    try
-      SetLength(RawText, FS.Size);
-      if FS.Size > 0 then
-        FS.ReadBuffer(RawText[1], FS.Size);
-    finally
-      FS.Free;
+    Buf.IsDeleted := False;
+    if (Length(ASourceText) >= 3) and
+       (ASourceText[1] = #$EF) and (ASourceText[2] = #$BB) and (ASourceText[3] = #$BF) then
+    begin
+      if Buf.Source <> Copy(ASourceText, 4, MaxInt) then
+      begin
+        Buf.Source := Copy(ASourceText, 4, MaxInt);
+        if CodeToolBoss.DirectoryCachePool <> nil then
+          CodeToolBoss.DirectoryCachePool.IncreaseFileTimeStamp;
+      end;
+    end
+    else if Buf.Source <> ASourceText then
+    begin
+      Buf.Source := ASourceText;
+      if CodeToolBoss.DirectoryCachePool <> nil then
+        CodeToolBoss.DirectoryCachePool.IncreaseFileTimeStamp;
     end;
-    if (Length(RawText) >= 3) and
-       (RawText[1] = #$EF) and (RawText[2] = #$BB) and (RawText[3] = #$BF) then
-      Delete(RawText, 1, 3);
-  except
-    Exit(nil);
   end;
-  Result := IndexText(Uri, FullPath, RawText);
+
+  ExtractDocumentSymbolsFromBuffer(Buf, DummyDocSyms, WsSyms, ModName, UsedArr);
+
+  Result := TPasIndexedFile.Create;
+  Result.Uri             := EffUri;
+  Result.NormalizedKey   := LowerCase(NormalizeDocumentUri(EffUri));
+  Result.FilePath        := ExpPath;
+  Result.ModuleName      := ModName;
+  Result.ModuleNameLower := LowerCase(ModName);
+  Result.UsedUnits       := UsedArr;
+  Result.Symbols         := WsSyms;
+  StoreIndexedFile(Result);
+end;
+
+procedure TNikSymbolIndex.CloseOpenDocument(const AUri, AFilePath: string);
+var
+  ExpPath, NormKey: string;
+  Buf: TCodeBuffer;
+begin
+  EnsureCodeToolsBaseInitialized;
+  if Trim(AFilePath) <> '' then
+    ExpPath := ExpandFileName(NormalizeNativeSeparators(AFilePath))
+  else
+    ExpPath := ExpandFileName(NormalizeNativeSeparators(UriToFilePath(AUri)));
+
+  if AUri <> '' then
+    NormKey := LowerCase(NormalizeDocumentUri(AUri))
+  else
+    NormKey := LowerCase(NormalizeDocumentUri(FilePathToUri(ExpPath)));
+
+  Buf := CodeToolBoss.FindFile(ExpPath);
+  if Buf <> nil then
+  begin
+    if FileExists(ExpPath) then
+      Buf.Revert
+    else
+      Buf.IsDeleted := True;
+    if CodeToolBoss.DirectoryCachePool <> nil then
+      CodeToolBoss.DirectoryCachePool.IncreaseFileTimeStamp;
+  end;
+
+  if FileExists(ExpPath) then
+    RefreshDiskFile(ExpPath)
+  else
+    RemoveIndexedByKey(NormKey);
+end;
+
+function TNikSymbolIndex.RefreshDiskFile(const AFilePath: string): TPasIndexedFile;
+var
+  ExpPath, EffUri, ModName: string;
+  Buf: TCodeBuffer;
+  DummyDocSyms: TLspDocumentSymbolArray;
+  WsSyms: TPasWorkspaceSymbolArray;
+  UsedArr: TLspStringArray;
+begin
+  Result := nil;
+  if (Trim(AFilePath) = '') or (not FileExists(AFilePath)) then
+    Exit;
+
+  EnsureCodeToolsBaseInitialized;
+  ExpPath := ExpandFileName(NormalizeNativeSeparators(AFilePath));
+  EffUri  := FilePathToUri(ExpPath);
+
+  Buf := CodeToolBoss.FindFile(ExpPath);
+  if Buf <> nil then
+    Buf.Revert
+  else
+    Buf := CodeToolBoss.LoadFile(ExpPath, True, False);
+
+  if CodeToolBoss.DirectoryCachePool <> nil then
+    CodeToolBoss.DirectoryCachePool.IncreaseFileTimeStamp;
+
+  if Buf = nil then
+    Exit;
+
+  ExtractDocumentSymbolsFromBuffer(Buf, DummyDocSyms, WsSyms, ModName, UsedArr);
+
+  Result := TPasIndexedFile.Create;
+  Result.Uri             := EffUri;
+  Result.NormalizedKey   := LowerCase(NormalizeDocumentUri(EffUri));
+  Result.FilePath        := ExpPath;
+  Result.ModuleName      := ModName;
+  Result.ModuleNameLower := LowerCase(ModName);
+  Result.UsedUnits       := UsedArr;
+  Result.Symbols         := WsSyms;
+  StoreIndexedFile(Result);
 end;
 
 function TNikSymbolIndex.FindFileByUri(const AUri: string): TPasIndexedFile;
@@ -1606,48 +1565,72 @@ begin
     Result := nil;
 end;
 
-function TNikSymbolIndex.DoesFileUseUnit(const AUri, AUnitNameLower: string): Boolean;
+function TNikSymbolIndex.DoesFileUseUnit(const AUri, AFilePath, AUnitNameLower: string): Boolean;
 var
   F: TPasIndexedFile;
+  Buf: TCodeBuffer;
+  MainUses, ImplUses: TStrings;
   I: Integer;
 begin
   Result := False;
   if AUnitNameLower = '' then
     Exit;
-  F := FindFileByUri(AUri);
-  if F = nil then
-    Exit;
-  for I := 0 to High(F.UsedUnits) do
-    if LowerCase(F.UsedUnits[I]) = AUnitNameLower then
-      Exit(True);
-end;
 
-function TNikSymbolIndex.BuildDocumentSymbols(const AUri: string): TLspDocumentSymbolArray;
-var
-  F: TPasIndexedFile;
-  I: Integer;
-begin
-  Result := nil;
   F := FindFileByUri(AUri);
-  if F = nil then
-    Exit;
-
-  SetLength(Result, Length(F.Symbols));
-  for I := 0 to High(F.Symbols) do
+  if F <> nil then
   begin
-    Result[I].ParentIndex := F.Symbols[I].ParentSymbolIndex;
-    if (F.Symbols[I].ParentSymbolIndex < 0) and (F.Symbols[I].ContainerName <> '') then
-      Result[I].Name := F.Symbols[I].ContainerName + '.' + F.Symbols[I].Name
-    else
-      Result[I].Name := F.Symbols[I].Name;
-    Result[I].Detail := F.Symbols[I].Detail;
-    Result[I].Kind := F.Symbols[I].Kind;
-    Result[I].Range := F.Symbols[I].Range;
-    Result[I].SelectionRange := F.Symbols[I].SelectionRange;
+    for I := 0 to High(F.UsedUnits) do
+      if LowerCase(F.UsedUnits[I]) = AUnitNameLower then
+        Exit(True);
+  end;
+
+  Buf := ObtainCodeBuffer(AFilePath, True);
+  if Buf = nil then
+    Exit;
+
+  MainUses := nil;
+  ImplUses := nil;
+  try
+    if CodeToolBoss.FindUsedUnitNames(Buf, MainUses, ImplUses) then
+    begin
+      if MainUses <> nil then
+        for I := 0 to MainUses.Count - 1 do
+          if LowerCase(MainUses[I]) = AUnitNameLower then
+            Exit(True);
+      if ImplUses <> nil then
+        for I := 0 to ImplUses.Count - 1 do
+          if LowerCase(ImplUses[I]) = AUnitNameLower then
+            Exit(True);
+    end;
+  finally
+    MainUses.Free;
+    ImplUses.Free;
   end;
 end;
 
-function TNikSymbolIndex.SearchWorkspaceSymbols(const AQuery: string; AMaxResults: Integer): TLspSymbolInformationArray;
+function TNikSymbolIndex.BuildDocumentSymbols(const AUri, AFilePath: string): TLspDocumentSymbolArray;
+var
+  ExpPath, ModName: string;
+  Buf: TCodeBuffer;
+  WsSyms: TPasWorkspaceSymbolArray;
+  UsedArr: TLspStringArray;
+begin
+  Result := nil;
+  EnsureCodeToolsBaseInitialized;
+  if Trim(AFilePath) <> '' then
+    ExpPath := AFilePath
+  else
+    ExpPath := UriToFilePath(AUri);
+
+  Buf := ObtainCodeBuffer(ExpPath, True);
+  if Buf = nil then
+    Exit;
+
+  ExtractDocumentSymbolsFromBuffer(Buf, Result, WsSyms, ModName, UsedArr);
+end;
+
+function TNikSymbolIndex.SearchWorkspaceSymbols(const AQuery: string;
+  AMaxResults: Integer): TLspSymbolInformationArray;
 var
   QLower: string;
   I, J, Count: Integer;
@@ -1679,340 +1662,470 @@ begin
   end;
 end;
 
-function TNikSymbolIndex.ResolveDefinitions(const AUri, AIdent: string): TLspLocationArray;
+function TNikSymbolIndex.ResolveDefinitions(const AUri, AFilePath: string;
+  ADoc: TLspDocument; const APos: TLspPosition): TLspLocationArray;
 var
-  TargetLower: string;
-  CurFile, UsedFile, AnyFile: TPasIndexedFile;
-  I, J, Count: Integer;
-
-  procedure AddLoc(const ALocUri: string; const ARange: TLspRange);
-  var
-    K: Integer;
-  begin
-    for K := 0 to Count - 1 do
-      if (Result[K].Uri = ALocUri) and
-         (Result[K].Range.StartPos.Line = ARange.StartPos.Line) and
-         (Result[K].Range.StartPos.Character = ARange.StartPos.Character) then
-        Exit;
-    SetLength(Result, Count + 1);
-    Result[Count] := TLspLocation.Create(ALocUri, ARange);
-    Inc(Count);
-  end;
-
+  ExpPath: string;
+  Buf, DeclBuf, BodyBuf: TCodeBuffer;
+  X, Y, DeclX, DeclY, DeclTop, BodyX, BodyY, BodyTop, BlockTop, BlockBot: Integer;
+  Revertable: Boolean;
 begin
   Result := nil;
-  Count := 0;
-  TargetLower := LowerCase(Trim(AIdent));
-  if TargetLower = '' then
+  EnsureCodeToolsBaseInitialized;
+  if Trim(AFilePath) <> '' then
+    ExpPath := AFilePath
+  else
+    ExpPath := UriToFilePath(AUri);
+
+  Buf := ObtainCodeBuffer(ExpPath, True);
+  if not LspPosToCodeXY(Buf, ADoc, APos, X, Y) then
     Exit;
 
-  CurFile := FindFileByUri(AUri);
-
-  // 1. Symbols inside current file first (so local symbols are never shadowed by unrelated unit names)
-  if CurFile <> nil then
+  CodeToolBoss.ClearError;
+  DeclBuf := nil;
+  if CodeToolBoss.FindMainDeclaration(Buf, X, Y, DeclBuf, DeclX, DeclY, DeclTop) and
+     (DeclBuf <> nil) then
   begin
-    for J := 0 to High(CurFile.Symbols) do
-      if (CurFile.Symbols[J].NameLower = TargetLower) and CurFile.Symbols[J].IsInterfaceSection then
-        AddLoc(CurFile.Uri, CurFile.Symbols[J].SelectionRange);
-    for J := 0 to High(CurFile.Symbols) do
-      if CurFile.Symbols[J].NameLower = TargetLower then
-        AddLoc(CurFile.Uri, CurFile.Symbols[J].SelectionRange);
-
-    if Count > 0 then
-      Exit;
-
-    // 2. Direct unit jump when identifier names an imported unit in 'uses'
-    for I := 0 to High(CurFile.UsedUnits) do
-      if SameText(CurFile.UsedUnits[I], AIdent) then
-      begin
-        UsedFile := EnsureUnitIndexed(CurFile.UsedUnits[I]);
-        if UsedFile <> nil then
-        begin
-          AddLoc(UsedFile.Uri, TLspRange.SingleLine(0, 0, 0));
-          Exit;
-        end;
-      end;
-
-    // 3. Interface symbols in units imported via 'uses'
-    for I := 0 to High(CurFile.UsedUnits) do
+    // If cursor was already standing on the interface/class declaration itself, toggle to implementation body
+    if (DeclBuf = Buf) and (DeclY = Y) then
     begin
-      UsedFile := EnsureUnitIndexed(CurFile.UsedUnits[I]);
-      if UsedFile <> nil then
+      BodyBuf := nil;
+      if CodeToolBoss.JumpToMethod(DeclBuf, DeclX, DeclY, BodyBuf, BodyX, BodyY, BodyTop,
+           BlockTop, BlockBot, Revertable) and (BodyBuf <> nil) then
       begin
-        for J := 0 to High(UsedFile.Symbols) do
-          if UsedFile.Symbols[J].IsInterfaceSection and (UsedFile.Symbols[J].NameLower = TargetLower) then
-            AddLoc(UsedFile.Uri, UsedFile.Symbols[J].SelectionRange);
+        SetLength(Result, 1);
+        Result[0] := TLspLocation.Create(
+          FilePathToUri(BodyBuf.Filename),
+          CodeXYIdentifierRange(BodyBuf, BodyX, BodyY)
+        );
+        Exit;
       end;
     end;
-    if Count > 0 then
-      Exit;
-  end;
 
-  // 4. Direct unit name jump fallback (e.g. dotted unit name or unindexed file)
-  UsedFile := EnsureUnitIndexed(AIdent);
-  if UsedFile <> nil then
-  begin
-    AddLoc(UsedFile.Uri, TLspRange.SingleLine(0, 0, 0));
+    SetLength(Result, 1);
+    Result[0] := TLspLocation.Create(
+      FilePathToUri(DeclBuf.Filename),
+      CodeXYIdentifierRange(DeclBuf, DeclX, DeclY)
+    );
     Exit;
   end;
 
-  // 5. Fallback across already-indexed project units
-  for I := 0 to FFiles.Count - 1 do
+  // Fallback when cursor is directly on an interface/class method header (where FindMainDeclaration returns False)
+  CodeToolBoss.ClearError;
+  BodyBuf := nil;
+  if CodeToolBoss.JumpToMethod(Buf, X, Y, BodyBuf, BodyX, BodyY, BodyTop,
+       BlockTop, BlockBot, Revertable) and (BodyBuf <> nil) then
   begin
-    AnyFile := TPasIndexedFile(FFiles[I]);
-    for J := 0 to High(AnyFile.Symbols) do
-      if AnyFile.Symbols[J].IsInterfaceSection and (AnyFile.Symbols[J].NameLower = TargetLower) then
-        AddLoc(AnyFile.Uri, AnyFile.Symbols[J].SelectionRange);
+    SetLength(Result, 1);
+    Result[0] := TLspLocation.Create(
+      FilePathToUri(BodyBuf.Filename),
+      CodeXYIdentifierRange(BodyBuf, BodyX, BodyY)
+    );
   end;
 end;
 
-function TNikSymbolIndex.ResolveHover(const AUri, AIdent: string; const AWordRange: TLspRange): TLspHover;
+function TNikSymbolIndex.ResolveDeclarations(const AUri, AFilePath: string;
+  ADoc: TLspDocument; const APos: TLspPosition): TLspLocationArray;
 var
-  TargetLower, Md: string;
-  CurFile, UsedFile: TPasIndexedFile;
-  I, J: Integer;
+  ExpPath: string;
+  Buf, DeclBuf, JumpBuf: TCodeBuffer;
+  X, Y, DeclX, DeclY, DeclTop, JumpX, JumpY, JumpTop, BlockTop, BlockBot: Integer;
+  Revertable: Boolean;
+begin
+  Result := nil;
+  EnsureCodeToolsBaseInitialized;
+  if Trim(AFilePath) <> '' then
+    ExpPath := AFilePath
+  else
+    ExpPath := UriToFilePath(AUri);
 
-  function BuildHoverFromSym(AFile: TPasIndexedFile; const ASym: TPasUnitSymbol): TLspHover;
+  Buf := ObtainCodeBuffer(ExpPath, True);
+  if not LspPosToCodeXY(Buf, ADoc, APos, X, Y) then
+    Exit;
+
+  CodeToolBoss.ClearError;
+  DeclBuf := nil;
+  if CodeToolBoss.FindMainDeclaration(Buf, X, Y, DeclBuf, DeclX, DeclY, DeclTop) and
+     (DeclBuf <> nil) then
   begin
-    Result := Default(TLspHover);
-    Result.HasValue := True;
-    Result.HasRange := True;
-    Result.Range := AWordRange;
-    Md := '```pascal' + #10 + ASym.Signature + #10 + '```';
-    if ASym.DocComment <> '' then
-      Md := Md + #10#10 + ASym.DocComment;
-    if AFile.ModuleName <> '' then
-      Md := Md + #10#10 + '*Unit `' + AFile.ModuleName + '`*';
-    Result.Markdown := Md;
+    SetLength(Result, 1);
+    Result[0] := TLspLocation.Create(
+      FilePathToUri(DeclBuf.Filename),
+      CodeXYIdentifierRange(DeclBuf, DeclX, DeclY)
+    );
+    Exit;
   end;
 
+  // Fallback for method implementation headers jumping back up to class/interface declaration
+  CodeToolBoss.ClearError;
+  JumpBuf := nil;
+  if CodeToolBoss.JumpToMethod(Buf, X, Y, JumpBuf, JumpX, JumpY, JumpTop,
+       BlockTop, BlockBot, Revertable) and (JumpBuf <> nil) and
+     ((JumpBuf <> Buf) or (JumpY < Y)) then
+  begin
+    SetLength(Result, 1);
+    Result[0] := TLspLocation.Create(
+      FilePathToUri(JumpBuf.Filename),
+      CodeXYIdentifierRange(JumpBuf, JumpX, JumpY)
+    );
+  end;
+end;
+
+function TNikSymbolIndex.ResolveHover(const AUri, AFilePath: string;
+  ADoc: TLspDocument; const APos: TLspPosition): TLspHover;
+var
+  ExpPath, SmartHint, SigLine, DocComment, ModUnitName, Md, Ident: string;
+  Buf, DeclBuf: TCodeBuffer;
+  X, Y, DeclX, DeclY, DeclTop, CleanPos: Integer;
+  WordRange: TLspRange;
+  HasWordRange: Boolean;
+  DeclTool: TCodeTool;
+  DeclNode: TCodeTreeNode;
+  DeclCaret: TCodeXYPosition;
 begin
   Result := Default(TLspHover);
-  TargetLower := LowerCase(Trim(AIdent));
-  if TargetLower = '' then
+  EnsureCodeToolsBaseInitialized;
+  if Trim(AFilePath) <> '' then
+    ExpPath := AFilePath
+  else
+    ExpPath := UriToFilePath(AUri);
+
+  Buf := ObtainCodeBuffer(ExpPath, True);
+  if not LspPosToCodeXY(Buf, ADoc, APos, X, Y) then
     Exit;
 
-  CurFile := FindFileByUri(AUri);
-  if CurFile <> nil then
-  begin
-    for J := 0 to High(CurFile.Symbols) do
-      if CurFile.Symbols[J].NameLower = TargetLower then
-        Exit(BuildHoverFromSym(CurFile, CurFile.Symbols[J]));
+  HasWordRange := False;
+  if (ADoc <> nil) and ADoc.ExtractIdentifierAt(APos, Ident, WordRange) then
+    HasWordRange := True;
 
-    for I := 0 to High(CurFile.UsedUnits) do
+  CodeToolBoss.ClearError;
+  DeclBuf := nil;
+  if not CodeToolBoss.FindMainDeclaration(Buf, X, Y, DeclBuf, DeclX, DeclY, DeclTop) then
+    Exit;
+  if DeclBuf = nil then
+    Exit;
+
+  // Direct unit jump/hover when cursor is on a unit name in uses
+  if (DeclX = 1) and (DeclY = 1) then
+  begin
+    ModUnitName := CodeToolBoss.GetSourceName(DeclBuf, False);
+    if ModUnitName = '' then
+      ModUnitName := ChangeFileExt(ExtractFileName(DeclBuf.Filename), '');
+    Result.HasValue := True;
+    Result.HasRange := HasWordRange;
+    Result.Range    := WordRange;
+    Result.Markdown := '```pascal' + #10 + 'unit ' + ModUnitName + ';' + #10 + '```' +
+      #10#10 + '`' + DeclBuf.Filename + '`';
+    Exit;
+  end;
+
+  SigLine := '';
+  DeclTool := nil;
+  if CodeToolBoss.Explore(DeclBuf, DeclTool, False, False) and (DeclTool <> nil) then
+  begin
+    DeclCaret.Code := DeclBuf;
+    DeclCaret.X := DeclX;
+    DeclCaret.Y := DeclY;
+    if DeclTool.CaretToCleanPos(DeclCaret, CleanPos) = 0 then
     begin
-      UsedFile := EnsureUnitIndexed(CurFile.UsedUnits[I]);
-      if UsedFile <> nil then
+      DeclNode := DeclTool.FindDeepestNodeAtPos(CleanPos, False);
+      while (DeclNode <> nil) and
+            not (DeclNode.Desc in [ctnProcedure, ctnProperty, ctnGlobalProperty,
+                                   ctnTypeDefinition, ctnGenericType,
+                                   ctnVarDefinition, ctnConstDefinition, ctnEnumIdentifier]) do
+        DeclNode := DeclNode.Parent;
+
+      if DeclNode <> nil then
       begin
-        for J := 0 to High(UsedFile.Symbols) do
-          if UsedFile.Symbols[J].IsInterfaceSection and (UsedFile.Symbols[J].NameLower = TargetLower) then
-            Exit(BuildHoverFromSym(UsedFile, UsedFile.Symbols[J]));
+        case DeclNode.Desc of
+          ctnProcedure:
+            SigLine := FormatPascalDeclaration(DeclTool.ExtractProcHead(DeclNode,
+              [phpWithStart, phpWithVarModifiers, phpWithParameterNames,
+               phpWithDefaultValues, phpWithResultType]));
+          ctnProperty, ctnGlobalProperty:
+            SigLine := FormatPascalDeclaration('property ' + Trim(DeclTool.ExtractProperty(DeclNode,
+              [phpWithVarModifiers, phpWithParameterNames, phpWithResultType])));
+          ctnVarDefinition:
+            SigLine := FormatPascalDeclaration(
+              Trim(DeclTool.ExtractDefinitionName(DeclNode)) + ': ' +
+              Trim(DeclTool.ExtractDefinitionNodeType(DeclNode)) + ';'
+            );
+          ctnTypeDefinition, ctnGenericType:
+            SigLine := FormatPascalDeclaration('type ' + Trim(DeclTool.ExtractNode(DeclNode, [])));
+          ctnConstDefinition:
+            SigLine := FormatPascalDeclaration('const ' + Trim(DeclTool.ExtractNode(DeclNode, [])));
+          ctnEnumIdentifier:
+            SigLine := GetIdentifier(@DeclTool.Src[DeclNode.StartPos]);
+        else
+          SigLine := '';
+        end;
       end;
     end;
   end;
 
-  UsedFile := EnsureUnitIndexed(AIdent);
-  if UsedFile <> nil then
+  if SigLine = '' then
   begin
-    Result.HasValue := True;
-    Result.HasRange := True;
-    Result.Range := AWordRange;
-    Result.Markdown := '```pascal' + #10 + 'unit ' + UsedFile.ModuleName + ';' + #10 + '```' +
-      #10#10 + '`' + UsedFile.FilePath + '`';
+    SmartHint := Trim(CodeToolBoss.FindSmartHint(Buf, X, Y));
+    if SmartHint <> '' then
+      SigLine := SmartHint;
   end;
+
+  if SigLine = '' then
+    Exit;
+
+  DocComment  := ExtractPasDocForCodeXY(DeclBuf, DeclX, DeclY);
+  ModUnitName := CodeToolBoss.GetSourceName(DeclBuf, True);
+  if ModUnitName = '' then
+    ModUnitName := ChangeFileExt(ExtractFileName(DeclBuf.Filename), '');
+
+  Md := '```pascal' + #10 + SigLine + #10 + '```';
+  if DocComment <> '' then
+    Md := Md + #10#10 + DocComment;
+  if ModUnitName <> '' then
+    Md := Md + #10#10 + '*Unit `' + ModUnitName + '`*';
+
+  Result.HasValue := True;
+  Result.HasRange := HasWordRange;
+  Result.Range    := WordRange;
+  Result.Markdown := Md;
 end;
 
-function TNikSymbolIndex.ResolveCompletions(const AUri, ALinePrefix: string): TLspCompletionList;
+function TNikSymbolIndex.ResolveCompletions(const AUri, AFilePath: string;
+  ADoc: TLspDocument; const APos: TLspPosition): TLspCompletionList;
 const
-  PASCAL_KEYWORDS: array[0..29] of string = (
-    'begin', 'end', 'procedure', 'function', 'constructor', 'destructor',
-    'class', 'record', 'interface', 'implementation', 'uses', 'type', 'const',
-    'var', 'property', 'try', 'finally', 'except', 'raise', 'if', 'then',
-    'else', 'case', 'of', 'for', 'while', 'repeat', 'until', 'Result', 'Exit'
-  );
+  MAX_COMPLETION_ITEMS = 3500;
 var
+  ExpPath, LineStr, Prefix, SortPfx: string;
+  Buf: TCodeBuffer;
+  X, Y, StartByte, TotalCount, I, OutCount, SeenIdx: Integer;
+  IdentList: TIdentifierList;
+  Item: TIdentifierListItem;
+  CompKind: TLspCompletionItemKind;
   Seen: TStringList;
-  Count, I, J, DotPos: Integer;
-  TrimPrefix, ReceiverLower: string;
-  CurFile, UsedFile: TPasIndexedFile;
-
-  procedure AddItem(const ALabel: string; AKind: TLspCompletionItemKind;
-    const ADetail, ADoc, ASortPrefix: string);
-  var
-    Key: string;
-    Idx: Integer;
-  begin
-    if ALabel = '' then
-      Exit;
-    Key := LowerCase(ALabel);
-    if Seen.Find(Key, Idx) then
-      Exit;
-    Seen.Add(Key);
-
-    SetLength(Result.Items, Count + 1);
-    Result.Items[Count] := Default(TLspCompletionItem);
-    Result.Items[Count].LabelText := ALabel;
-    Result.Items[Count].Kind := AKind;
-    Result.Items[Count].Detail := ADetail;
-    Result.Items[Count].DocumentationMarkdown := ADoc;
-    Result.Items[Count].SortText := ASortPrefix + ALabel;
-    Inc(Count);
-  end;
-
-  procedure AddContainerMembers(AFile: TPasIndexedFile; const AContainerLower: string; AOnlyInterface: Boolean);
-  var
-    K: Integer;
-  begin
-    if AFile = nil then
-      Exit;
-    for K := 0 to High(AFile.Symbols) do
-    begin
-      if AOnlyInterface and (not AFile.Symbols[K].IsInterfaceSection) then
-        Continue;
-      if LowerCase(AFile.Symbols[K].ContainerName) = AContainerLower then
-        AddItem(AFile.Symbols[K].Name, AFile.Symbols[K].CompletionKind,
-          AFile.Symbols[K].Signature, AFile.Symbols[K].DocComment, '0_');
-    end;
-  end;
-
+  KeyLower: string;
+  ItemCaret: TCodeXYPosition;
 begin
   Result := Default(TLspCompletionList);
   Result.IsIncomplete := False;
-  Count := 0;
+  EnsureCodeToolsBaseInitialized;
 
+  if Trim(AFilePath) <> '' then
+    ExpPath := AFilePath
+  else
+    ExpPath := UriToFilePath(AUri);
+
+  Buf := ObtainCodeBuffer(ExpPath, True);
+  if not LspPosToCodeXY(Buf, ADoc, APos, X, Y) then
+    Exit;
+
+  Prefix := '';
+  if ADoc <> nil then
+    LineStr := ADoc.GetLineText(APos.Line)
+  else if (APos.Line >= 0) and (APos.Line < Buf.LineCount) then
+    LineStr := Buf.GetLine(APos.Line, False)
+  else
+    LineStr := '';
+
+  StartByte := X - 1;
+  if StartByte > Length(LineStr) then
+    StartByte := Length(LineStr);
+  while (StartByte >= 1) and IsIdentByte(LineStr[StartByte]) do
+    Dec(StartByte);
+  if StartByte + 1 <= X - 1 then
+    Prefix := Copy(LineStr, StartByte + 1, (X - 1) - StartByte);
+
+  CodeToolBoss.ClearError;
+  if not CodeToolBoss.GatherIdentifiers(Buf, X, Y) then
+    Exit;
+
+  IdentList := CodeToolBoss.IdentifierList;
+  // Return full scope set for fast client-side fuzzy matching unless scope exceeds MAX_COMPLETION_ITEMS
+  if (IdentList.Count > MAX_COMPLETION_ITEMS) and (Prefix <> '') then
+  begin
+    IdentList.Prefix := Prefix;
+    Result.IsIncomplete := True;
+  end
+  else
+    IdentList.Prefix := '';
+
+  TotalCount := IdentList.GetFilteredCount;
+  if TotalCount <= 0 then
+    Exit;
+
+  if TotalCount > MAX_COMPLETION_ITEMS then
+    Result.IsIncomplete := True;
+
+  OutCount := 0;
   Seen := TStringList.Create;
   try
     Seen.Sorted := True;
     Seen.Duplicates := dupIgnore;
 
-    CurFile := FindFileByUri(AUri);
-    TrimPrefix := TrimRight(ALinePrefix);
-
-    // Qualified completion after 'UnitOrType.'
-    DotPos := Length(TrimPrefix);
-    while (DotPos >= 1) and IsIdentCont(TrimPrefix[DotPos]) do
-      Dec(DotPos);
-
-    if (DotPos >= 2) and (TrimPrefix[DotPos] = '.') then
+    for I := 0 to TotalCount - 1 do
     begin
-      I := DotPos - 1;
-      while (I >= 1) and (IsIdentCont(TrimPrefix[I]) or (TrimPrefix[I] = '.')) do
-        Dec(I);
-      ReceiverLower := LowerCase(Copy(TrimPrefix, I + 1, DotPos - I - 1));
-      if ReceiverLower <> '' then
+      if OutCount >= MAX_COMPLETION_ITEMS then
+        Break;
+      Item := IdentList.FilteredItems[I];
+      if (Item = nil) or (Item.Identifier = '') then
+        Continue;
+
+      if not MapIdentItemKind(Item, CompKind) then
+        Continue;
+
+      LineStr := BuildIdentItemDetail(Item);
+      KeyLower := LowerCase(Item.Identifier + '|' + LineStr);
+      if Seen.Find(KeyLower, SeenIdx) then
+        Continue;
+      Seen.Add(KeyLower);
+
+      if iliKeyword in Item.Flags then
+        SortPfx := '9_'
+      else
       begin
-        UsedFile := nil;
-        if (CurFile <> nil) and (CurFile.ModuleNameLower = ReceiverLower) then
-          UsedFile := CurFile
-        else if DoesFileUseUnit(AUri, ReceiverLower) then
-          UsedFile := EnsureUnitIndexed(ReceiverLower);
-
-        if UsedFile <> nil then
-        begin
-          for J := 0 to High(UsedFile.Symbols) do
-            if ((UsedFile = CurFile) or UsedFile.Symbols[J].IsInterfaceSection) and
-               (UsedFile.Symbols[J].ParentSymbolIndex < 0) then
-              AddItem(UsedFile.Symbols[J].Name, UsedFile.Symbols[J].CompletionKind,
-                UsedFile.Symbols[J].Signature, UsedFile.Symbols[J].DocComment, '0_');
-          if Count > 0 then
-            Exit;
+        case Item.Compatibility of
+          icompExact:        SortPfx := '0_';
+          icompCompatible:   SortPfx := '1_';
+          icompUnknown:      SortPfx := '2_';
+          icompIncompatible: SortPfx := '3_';
+        else
+          SortPfx := '2_';
         end;
-
-        AddContainerMembers(CurFile, ReceiverLower, False);
-        if CurFile <> nil then
-          for I := 0 to High(CurFile.UsedUnits) do
-            AddContainerMembers(EnsureUnitIndexed(CurFile.UsedUnits[I]), ReceiverLower, True);
-        if Count > 0 then
-          Exit;
       end;
-    end;
 
-    // Unqualified scope completion: current file symbols + imported interface symbols + keywords
-    if CurFile <> nil then
-    begin
-      for J := 0 to High(CurFile.Symbols) do
-        if CurFile.Symbols[J].ParentSymbolIndex < 0 then
-          AddItem(CurFile.Symbols[J].Name, CurFile.Symbols[J].CompletionKind,
-            CurFile.Symbols[J].Signature, CurFile.Symbols[J].DocComment, '1_');
-
-      for I := 0 to High(CurFile.UsedUnits) do
+      SetLength(Result.Items, OutCount + 1);
+      Result.Items[OutCount] := Default(TLspCompletionItem);
+      Result.Items[OutCount].LabelText := Item.Identifier;
+      Result.Items[OutCount].Kind      := CompKind;
+      Result.Items[OutCount].Detail    := LineStr;
+      if (TotalCount <= 150) and (Item.Node <> nil) and (Item.Tool <> nil) then
       begin
-        UsedFile := EnsureUnitIndexed(CurFile.UsedUnits[I]);
-        if UsedFile <> nil then
-        begin
-          for J := 0 to High(UsedFile.Symbols) do
-          begin
-            if UsedFile.Symbols[J].IsInterfaceSection and (UsedFile.Symbols[J].ParentSymbolIndex < 0) then
-              AddItem(UsedFile.Symbols[J].Name, UsedFile.Symbols[J].CompletionKind,
-                UsedFile.Symbols[J].Signature, UsedFile.Symbols[J].DocComment, '2_');
-            if Count >= 250 then
-              Break;
-          end;
-        end;
-        if Count >= 250 then
-          Break;
+        if Item.Tool.CleanPosToCaret(Item.Node.StartPos, ItemCaret) and
+           (ItemCaret.Code <> nil) then
+          Result.Items[OutCount].DocumentationMarkdown := ExtractPasDocForCodeXY(
+            ItemCaret.Code,
+            ItemCaret.X,
+            ItemCaret.Y
+          );
       end;
+      Result.Items[OutCount].SortText  := SortPfx + Format('%.4d_', [I]) + Item.Identifier;
+      if iliNeedsAmpersand in Item.Flags then
+        Result.Items[OutCount].InsertText := '&' + Item.Identifier;
+      Inc(OutCount);
     end;
-
-    for I := Low(PASCAL_KEYWORDS) to High(PASCAL_KEYWORDS) do
-      AddItem(PASCAL_KEYWORDS[I], lcikKeyword, 'keyword', '', '9_');
   finally
     Seen.Free;
   end;
 end;
 
-function TNikSymbolIndex.ResolveSignatureHelp(const AUri, ACalleeIdent: string; AActiveParam: Integer): TLspSignatureHelp;
+function TNikSymbolIndex.ResolveSignatureHelp(const AUri, AFilePath: string;
+  ADoc: TLspDocument; const APos: TLspPosition): TLspSignatureHelp;
 var
-  TargetLower: string;
-  CurFile, UsedFile: TPasIndexedFile;
-  I, J, K, SigCount: Integer;
-
-  procedure AddSig(const ASym: TPasUnitSymbol);
-  var
-    PIdx: Integer;
-  begin
-    if (ASym.Kind <> lskFunction) and (ASym.Kind <> lskMethod) and (ASym.Kind <> lskConstructor) then
-      Exit;
-    SetLength(Result.Signatures, SigCount + 1);
-    Result.Signatures[SigCount].LabelText := ASym.Signature;
-    Result.Signatures[SigCount].DocumentationMarkdown := ASym.DocComment;
-    SetLength(Result.Signatures[SigCount].Parameters, Length(ASym.Params));
-    for PIdx := 0 to High(ASym.Params) do
-    begin
-      Result.Signatures[SigCount].Parameters[PIdx].LabelText := ASym.Params[PIdx];
-      Result.Signatures[SigCount].Parameters[PIdx].DocumentationMarkdown := '';
-    end;
-    Inc(SigCount);
-  end;
-
+  ExpPath, ParamsRaw, RetRaw, ProcName, LabelStr, DocComment: string;
+  Buf: TCodeBuffer;
+  X, Y, I, PIdx, OutCount: Integer;
+  Contexts: TCodeContextInfo;
+  CtxItem: TCodeContextInfoItem;
+  ProcNode: TCodeTreeNode;
+  ProcTool: TFindDeclarationTool;
+  ParamParts: TLspStringArray;
+  Caret: TCodeXYPosition;
 begin
   Result := Default(TLspSignatureHelp);
   Result.ActiveSignature := 0;
-  if AActiveParam >= 0 then
-    Result.ActiveParameter := AActiveParam
-  else
-    Result.ActiveParameter := 0;
+  Result.ActiveParameter := 0;
+  EnsureCodeToolsBaseInitialized;
 
-  TargetLower := LowerCase(Trim(ACalleeIdent));
-  if TargetLower = '' then
+  if Trim(AFilePath) <> '' then
+    ExpPath := AFilePath
+  else
+    ExpPath := UriToFilePath(AUri);
+
+  Buf := ObtainCodeBuffer(ExpPath, True);
+  if not LspPosToCodeXY(Buf, ADoc, APos, X, Y) then
     Exit;
 
-  SigCount := 0;
-  CurFile := FindFileByUri(AUri);
-  if CurFile <> nil then
-  begin
-    for J := 0 to High(CurFile.Symbols) do
-      if CurFile.Symbols[J].NameLower = TargetLower then
-        AddSig(CurFile.Symbols[J]);
+  CodeToolBoss.ClearError;
+  Contexts := nil;
+  try
+    if not CodeToolBoss.FindCodeContext(Buf, X, Y, Contexts) then
+      Exit;
+    if (Contexts = nil) or (Contexts.Count = 0) then
+      Exit;
 
-    for I := 0 to High(CurFile.UsedUnits) do
+    if Contexts.ParameterIndex > 1 then
+      Result.ActiveParameter := Contexts.ParameterIndex - 1
+    else
+      Result.ActiveParameter := 0;
+
+    OutCount := 0;
+    for I := 0 to Contexts.Count - 1 do
     begin
-      UsedFile := EnsureUnitIndexed(CurFile.UsedUnits[I]);
-      if UsedFile <> nil then
-        for K := 0 to High(UsedFile.Symbols) do
-          if UsedFile.Symbols[K].IsInterfaceSection and (UsedFile.Symbols[K].NameLower = TargetLower) then
-            AddSig(UsedFile.Symbols[K]);
+      CtxItem := Contexts[I];
+      if CtxItem = nil then
+        Continue;
+
+      ParamParts := nil;
+      LabelStr := '';
+      DocComment := '';
+
+      if (CtxItem.Expr.Context.Node <> nil) and (CtxItem.Expr.Context.Tool <> nil) and
+         (CtxItem.Expr.Context.Node.Desc = ctnProcedure) then
+      begin
+        ProcNode := CtxItem.Expr.Context.Node;
+        ProcTool := CtxItem.Expr.Context.Tool;
+        ProcName := Trim(ProcTool.ExtractProcName(ProcNode, []));
+        ParamsRaw := FormatPascalDeclaration(ProcTool.ExtractProcHead(ProcNode,
+          [phpWithoutName, phpWithoutBrackets, phpWithoutSemicolon,
+           phpWithVarModifiers, phpWithParameterNames, phpWithDefaultValues]));
+        RetRaw := FormatPascalDeclaration(ProcTool.ExtractFuncResultType(ProcNode, [phpWithoutSemicolon]));
+        if (Length(RetRaw) > 0) and (RetRaw[1] = ':') and
+           (Length(RetRaw) >= 2) and (RetRaw[2] <> ' ') then
+          RetRaw := ': ' + Trim(Copy(RetRaw, 2, MaxInt));
+
+        SplitParameterStrings(ParamsRaw, ParamParts);
+        LabelStr := FormatPascalDeclaration(ProcName + '(' + ParamsRaw + ')' + RetRaw);
+
+        if ProcTool.CleanPosToCaret(ProcNode.StartPos, Caret) and (Caret.Code <> nil) then
+          DocComment := ExtractPasDocForCodeXY(Caret.Code, Caret.X, Caret.Y);
+      end
+      else if CtxItem.ProcName <> '' then
+      begin
+        ProcName := CtxItem.ProcName;
+        if CtxItem.Params <> nil then
+        begin
+          SetLength(ParamParts, CtxItem.Params.Count);
+          ParamsRaw := '';
+          for PIdx := 0 to CtxItem.Params.Count - 1 do
+          begin
+            ParamParts[PIdx] := Trim(CtxItem.Params[PIdx]);
+            if PIdx > 0 then
+              ParamsRaw := ParamsRaw + '; ';
+            ParamsRaw := ParamsRaw + ParamParts[PIdx];
+          end;
+        end
+        else
+          ParamsRaw := '';
+        LabelStr := ProcName + '(' + ParamsRaw + ')';
+        if CtxItem.ResultType <> '' then
+          LabelStr := LabelStr + ': ' + CtxItem.ResultType;
+      end;
+
+      if LabelStr = '' then
+        Continue;
+
+      SetLength(Result.Signatures, OutCount + 1);
+      Result.Signatures[OutCount].LabelText := LabelStr;
+      Result.Signatures[OutCount].DocumentationMarkdown := DocComment;
+      SetLength(Result.Signatures[OutCount].Parameters, Length(ParamParts));
+      for PIdx := 0 to High(ParamParts) do
+      begin
+        Result.Signatures[OutCount].Parameters[PIdx].LabelText := ParamParts[PIdx];
+        Result.Signatures[OutCount].Parameters[PIdx].DocumentationMarkdown := '';
+      end;
+      Inc(OutCount);
     end;
+  finally
+    Contexts.Free;
   end;
 end;
 

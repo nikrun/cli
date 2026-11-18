@@ -54,7 +54,7 @@ runs:
       shell: pwsh
       run: |
         Set-Location "${{ inputs.working-directory }}"
-        git submodule update --init --recursive
+        git submodule update --init --recursive --depth 1
 
     - name: Resolve Version & Target Context
       id: context

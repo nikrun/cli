@@ -34,6 +34,7 @@ type
     EntryPath: string;
     OutputBinaryPath: string;
     UnitOutputDir: string;
+    ManifestFiles: TStringArray;
     CleanRebuild: Boolean;
 
     // Dialect & syntax

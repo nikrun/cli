@@ -98,7 +98,7 @@ end;
 
 procedure ResolveDependenciesPaths(const AManifest: TResolvedManifest;
   const ATargetCpu, ATargetOs: string;
-  var AUnitPaths, AIncludePaths, ALibPaths, AObjPaths: TStringArray);
+  var AUnitPaths, AIncludePaths, ALibPaths, AObjPaths, AManifestFiles: TStringArray);
 var
   I, J: Integer;
   Dep: TDependencySpec;
@@ -139,6 +139,7 @@ begin
 
     if ChosenManifest <> '' then
     begin
+      AppendUniquePath(AManifestFiles, ExpandFileName(ChosenManifest));
       DepManifest := LoadManifestFile(ChosenManifest);
       DepResolved := ResolveManifestConfig(DepManifest, 'debug', ATargetCpu, ATargetOs, False, False);
       if (Length(DepResolved.UnitPaths) > 0) or (Length(DepResolved.IncludePaths) > 0) or
@@ -288,7 +289,7 @@ function BuildCompileSpecFromManifest(const AManifest: TResolvedManifest;
 var
   I: Integer;
   CacheKey, SuffixClean: string;
-  EffUnitPaths, EffIncludePaths, EffLibPaths, EffObjPaths: TStringArray;
+  EffUnitPaths, EffIncludePaths, EffLibPaths, EffObjPaths, EffManifestFiles: TStringArray;
 begin
   Result := Default(TCompileSpec);
 
@@ -319,6 +320,9 @@ begin
   EffIncludePaths := nil;
   EffLibPaths := nil;
   EffObjPaths := nil;
+  EffManifestFiles := nil;
+  if Trim(AManifest.ManifestPath) <> '' then
+    AppendUniquePath(EffManifestFiles, ExpandFileName(AManifest.ManifestPath));
 
   // Always include entry file's directory so sibling units next to entry are found naturally
   AppendUniquePath(EffUnitPaths, ExtractFileDir(Result.EntryPath));
@@ -338,12 +342,13 @@ begin
   end;
 
   ResolveDependenciesPaths(AManifest, ASdk.Manifest.TargetCpu, ASdk.Manifest.TargetOs,
-    EffUnitPaths, EffIncludePaths, EffLibPaths, EffObjPaths);
+    EffUnitPaths, EffIncludePaths, EffLibPaths, EffObjPaths, EffManifestFiles);
 
   Result.UnitPaths := EffUnitPaths;
   Result.IncludePaths := EffIncludePaths;
   Result.LibraryPaths := EffLibPaths;
   Result.ObjectPaths := EffObjPaths;
+  Result.ManifestFiles := EffManifestFiles;
 
   Result.OutputBinaryPath := ResolveOutputBinaryPath(
     AManifest.ProjectDir, AManifest.Output, ASdk.Manifest.TargetOs, AArtifactKind);

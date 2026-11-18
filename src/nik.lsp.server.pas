@@ -73,8 +73,7 @@ type
 
     procedure ReloadWorkspaceConfiguration;
     procedure EnsureIndexedDoc(const AUri: string; ADoc: TLspDocument);
-    procedure ExtractCallSiteBeforeCursor(ADoc: TLspDocument; const APos: TLspPosition;
-      out ACalleeIdent: string; out AActiveParam: Integer);
+    function ResolveDocFilePath(const AUri: string; ADoc: TLspDocument): string;
   protected
     procedure ConfigureCapabilities(const AParams: TLspInitializeParams;
       var ACaps: TLspServerCapabilities); override;
@@ -93,6 +92,8 @@ type
     function DoDocumentSymbol(const AUri: string; ADoc: TLspDocument): TLspDocumentSymbolArray; override;
     function DoWorkspaceSymbol(const AQuery: string): TLspSymbolInformationArray; override;
     function DoDefinition(const AUri: string; ADoc: TLspDocument;
+      const APos: TLspPosition): TLspLocationArray; override;
+    function DoDeclaration(const AUri: string; ADoc: TLspDocument;
       const APos: TLspPosition): TLspLocationArray; override;
     function DoHover(const AUri: string; ADoc: TLspDocument;
       const APos: TLspPosition): TLspHover; override;
@@ -415,7 +416,7 @@ begin
     Doc := Documents[I];
     if (Doc = nil) or (Doc.NormalizedKey = ModKey) or (not IsPascalDocFilePath(Doc.FilePath)) then
       Continue;
-    if (Ext = '.inc') or ((UnitLower <> '') and FIndex.DoesFileUseUnit(Doc.Uri, UnitLower)) then
+    if (Ext = '.inc') or ((UnitLower <> '') and FIndex.DoesFileUseUnit(Doc.Uri, Doc.FilePath, UnitLower)) then
       EnqueueValidation(Doc.Uri, Doc.FilePath, False);
   end;
 end;
@@ -589,11 +590,14 @@ procedure TNikPascalLspServer.ReloadWorkspaceConfiguration;
 var
   RootDir, WarnMsg, ManifestUri: string;
   ManDiags: TLspDiagnosticArray;
-  OpenManDoc: TLspDocument;
+  OpenManDoc, OpenPasDoc: TLspDocument;
+  I: Integer;
 begin
   FreeAndNil(FActiveCheck);
   RootDir := DetermineWorkspaceRootDir;
   FWorkspaceReady := ResolveLspWorkspace(RootDir, FManifestOverride, FProfileName, FWorkspace, WarnMsg);
+  if FWorkspaceReady then
+    EnsureFreshLspCompilerCache(FWorkspace);
 
   // Publish or clear diagnostics on nik.yaml (using open editor URI when nik.yaml is open)
   if FWorkspace.ManifestPath <> '' then
@@ -628,27 +632,21 @@ begin
     end;
   end;
 
-  if FWorkspaceReady then
-  begin
-    FIndex.ConfigureSearchPaths(
-      FWorkspace.UnitPaths, FWorkspace.RtlSourceDir, FWorkspace.PackagesSourceDir
-    );
-    FIndex.IndexProjectUnitDirs(FWorkspace.UnitPaths);
-    if (FWorkspace.EntryPath <> '') and FileExists(FWorkspace.EntryPath) then
-      FIndex.IndexDiskFile(FWorkspace.EntryPath);
+  FIndex.ConfigureWorkspace(FWorkspace, FWorkspaceReady, RootDir);
 
-    SendLogMessage(lmtInfo, Format('nik lsp ready (SDK: %s, profile: %s, root: %s)',
-      [FWorkspace.Sdk.Manifest.SdkId, FWorkspace.ProfileName, FWorkspace.ProjectDir]));
-  end
-  else
+  // Re-apply any unsaved open Pascal buffers on top of freshly scanned disk files
+  for I := 0 to Documents.Count - 1 do
   begin
-    if RootDir <> '' then
-    begin
-      FIndex.ConfigureSearchPaths([RootDir], '', '');
-      FIndex.IndexProjectUnitDirs([RootDir]);
-    end;
-    SendLogMessage(lmtWarning, 'nik lsp workspace fallback (no SDK/manifest resolved): ' + WarnMsg);
+    OpenPasDoc := Documents[I];
+    if (OpenPasDoc <> nil) and (not IsManifestFilePath(OpenPasDoc.FilePath)) then
+      FIndex.SyncOpenDocument(OpenPasDoc.Uri, OpenPasDoc.FilePath, OpenPasDoc.Text);
   end;
+
+  if FWorkspaceReady then
+    SendLogMessage(lmtInfo, Format('nik lsp ready (SDK: %s, profile: %s, root: %s)',
+      [FWorkspace.Sdk.Manifest.SdkId, FWorkspace.ProfileName, FWorkspace.ProjectDir]))
+  else
+    SendLogMessage(lmtWarning, 'nik lsp workspace fallback (no SDK/manifest resolved): ' + WarnMsg);
 end;
 
 procedure TNikPascalLspServer.DoInitialized;
@@ -669,17 +667,25 @@ begin
   end;
 end;
 
+function TNikPascalLspServer.ResolveDocFilePath(const AUri: string; ADoc: TLspDocument): string;
+begin
+  if (ADoc <> nil) and (ADoc.FilePath <> '') then
+    Result := ADoc.FilePath
+  else
+    Result := UriToFilePath(AUri);
+end;
+
 procedure TNikPascalLspServer.EnsureIndexedDoc(const AUri: string; ADoc: TLspDocument);
 var
   LocalPath: string;
 begin
   if ADoc <> nil then
-    FIndex.IndexText(ADoc.Uri, ADoc.FilePath, ADoc.Text)
+    FIndex.SyncOpenDocument(ADoc.Uri, ADoc.FilePath, ADoc.Text)
   else if FIndex.FindFileByUri(AUri) = nil then
   begin
     LocalPath := UriToFilePath(AUri);
     if (LocalPath <> '') and FileExists(LocalPath) then
-      FIndex.IndexDiskFile(LocalPath);
+      FIndex.RefreshDiskFile(LocalPath);
   end;
 end;
 
@@ -704,7 +710,7 @@ begin
     Exit;
   end;
 
-  FIndex.IndexText(ADoc.Uri, ADoc.FilePath, ADoc.Text);
+  FIndex.SyncOpenDocument(ADoc.Uri, ADoc.FilePath, ADoc.Text);
   if IsPascalDocFilePath(ADoc.FilePath) then
   begin
     ScheduleImmediateValidation(ADoc.Uri, ADoc.FilePath);
@@ -733,7 +739,7 @@ begin
     Exit;
   end;
 
-  FIndex.IndexText(ADoc.Uri, ADoc.FilePath, ADoc.Text);
+  FIndex.SyncOpenDocument(ADoc.Uri, ADoc.FilePath, ADoc.Text);
   if IsPascalDocFilePath(ADoc.FilePath) then
   begin
     ScheduleDebouncedValidation(ADoc.Uri, ADoc.FilePath);
@@ -754,7 +760,7 @@ begin
     Exit;
   end;
 
-  FIndex.IndexText(ADoc.Uri, ADoc.FilePath, ADoc.Text);
+  FIndex.SyncOpenDocument(ADoc.Uri, ADoc.FilePath, ADoc.Text);
   if IsPascalDocFilePath(ADoc.FilePath) then
   begin
     ScheduleImmediateValidation(ADoc.Uri, ADoc.FilePath);
@@ -784,9 +790,8 @@ begin
   if (FActiveCheck <> nil) and (FActiveCheck.OwnerKey = ClosedKey) then
     FreeAndNil(FActiveCheck);
 
-  // Re-sync symbol table and overlay directory with saved disk state
-  if (AFilePath <> '') and FileExists(AFilePath) then
-    FIndex.IndexDiskFile(AFilePath);
+  // Re-sync CodeTools buffer and overlay directory with saved disk state
+  FIndex.CloseOpenDocument(AUri, AFilePath);
   if FWorkspaceReady then
     SyncOpenDocumentsOverlay(FWorkspace, Documents, OverlayEntries);
 
@@ -850,7 +855,9 @@ begin
       if Documents.FindDocument(AChanges[I].Uri) = nil then
       begin
         if (AChanges[I].ChangeType <> lfctDeleted) and FileExists(LocalPath) then
-          FIndex.IndexDiskFile(LocalPath);
+          FIndex.RefreshDiskFile(LocalPath)
+        else
+          FIndex.CloseOpenDocument(AChanges[I].Uri, LocalPath);
         SourceTouched := True;
       end;
     end;
@@ -914,11 +921,14 @@ begin
 end;
 
 function TNikPascalLspServer.DoDocumentSymbol(const AUri: string; ADoc: TLspDocument): TLspDocumentSymbolArray;
+var
+  DocPath: string;
 begin
-  if IsManifestFilePath(UriToFilePath(AUri)) then
+  DocPath := ResolveDocFilePath(AUri, ADoc);
+  if IsManifestFilePath(DocPath) then
     Exit(nil);
   EnsureIndexedDoc(AUri, ADoc);
-  Result := FIndex.BuildDocumentSymbols(AUri);
+  Result := FIndex.BuildDocumentSymbols(AUri, DocPath);
 end;
 
 function TNikPascalLspServer.DoWorkspaceSymbol(const AQuery: string): TLspSymbolInformationArray;
@@ -929,121 +939,81 @@ end;
 function TNikPascalLspServer.DoDefinition(const AUri: string; ADoc: TLspDocument;
   const APos: TLspPosition): TLspLocationArray;
 var
-  Ident: string;
-  WordRange: TLspRange;
+  DocPath: string;
   I: Integer;
   OpenDoc: TLspDocument;
 begin
   Result := nil;
-  if IsManifestFilePath(UriToFilePath(AUri)) then
+  DocPath := ResolveDocFilePath(AUri, ADoc);
+  if IsManifestFilePath(DocPath) then
     Exit;
   EnsureIndexedDoc(AUri, ADoc);
-  if (ADoc <> nil) and ADoc.ExtractIdentifierAt(APos, Ident, WordRange) then
+  Result := FIndex.ResolveDefinitions(AUri, DocPath, ADoc, APos);
+  for I := 0 to High(Result) do
   begin
-    Result := FIndex.ResolveDefinitions(AUri, Ident);
-    for I := 0 to High(Result) do
-    begin
-      OpenDoc := Documents.FindDocument(Result[I].Uri);
-      if OpenDoc <> nil then
-        Result[I].Uri := OpenDoc.Uri;
-    end;
+    OpenDoc := Documents.FindDocument(Result[I].Uri);
+    if OpenDoc <> nil then
+      Result[I].Uri := OpenDoc.Uri;
+  end;
+end;
+
+function TNikPascalLspServer.DoDeclaration(const AUri: string; ADoc: TLspDocument;
+  const APos: TLspPosition): TLspLocationArray;
+var
+  DocPath: string;
+  I: Integer;
+  OpenDoc: TLspDocument;
+begin
+  Result := nil;
+  DocPath := ResolveDocFilePath(AUri, ADoc);
+  if IsManifestFilePath(DocPath) then
+    Exit;
+  EnsureIndexedDoc(AUri, ADoc);
+  Result := FIndex.ResolveDeclarations(AUri, DocPath, ADoc, APos);
+  for I := 0 to High(Result) do
+  begin
+    OpenDoc := Documents.FindDocument(Result[I].Uri);
+    if OpenDoc <> nil then
+      Result[I].Uri := OpenDoc.Uri;
   end;
 end;
 
 function TNikPascalLspServer.DoHover(const AUri: string; ADoc: TLspDocument;
   const APos: TLspPosition): TLspHover;
 var
-  Ident: string;
-  WordRange: TLspRange;
+  DocPath: string;
 begin
   Result := Default(TLspHover);
-  if IsManifestFilePath(UriToFilePath(AUri)) then
+  DocPath := ResolveDocFilePath(AUri, ADoc);
+  if IsManifestFilePath(DocPath) then
     Exit;
   EnsureIndexedDoc(AUri, ADoc);
-  if (ADoc <> nil) and ADoc.ExtractIdentifierAt(APos, Ident, WordRange) then
-    Result := FIndex.ResolveHover(AUri, Ident, WordRange);
+  Result := FIndex.ResolveHover(AUri, DocPath, ADoc, APos);
 end;
 
 function TNikPascalLspServer.DoCompletion(const AUri: string; ADoc: TLspDocument;
   const APos: TLspPosition; const ATriggerChar: string): TLspCompletionList;
 var
-  LineStr, Prefix: string;
-  ByteIdx: Integer;
+  DocPath: string;
 begin
-  if IsManifestFilePath(UriToFilePath(AUri)) then
+  DocPath := ResolveDocFilePath(AUri, ADoc);
+  if IsManifestFilePath(DocPath) then
     Exit(Default(TLspCompletionList));
   EnsureIndexedDoc(AUri, ADoc);
-  Prefix := '';
-  if ADoc <> nil then
-  begin
-    LineStr := ADoc.GetLineText(APos.Line);
-    ByteIdx := Utf16ColToByteIndex(LineStr, APos.Character);
-    Prefix := Copy(LineStr, 1, ByteIdx - 1);
-  end;
-  Result := FIndex.ResolveCompletions(AUri, Prefix);
-end;
-
-procedure TNikPascalLspServer.ExtractCallSiteBeforeCursor(ADoc: TLspDocument;
-  const APos: TLspPosition; out ACalleeIdent: string; out AActiveParam: Integer);
-var
-  LineStr: string;
-  ByteIdx, I, ParenDepth, Commas, IdentEnd, IdentStart: Integer;
-begin
-  ACalleeIdent := '';
-  AActiveParam := 0;
-  if ADoc = nil then
-    Exit;
-
-  LineStr := ADoc.GetLineText(APos.Line);
-  ByteIdx := Utf16ColToByteIndex(LineStr, APos.Character) - 1;
-  if ByteIdx > Length(LineStr) then
-    ByteIdx := Length(LineStr);
-
-  ParenDepth := 0;
-  Commas := 0;
-  I := ByteIdx;
-  while I >= 1 do
-  begin
-    if LineStr[I] = ')' then
-      Inc(ParenDepth)
-    else if LineStr[I] = '(' then
-    begin
-      if ParenDepth > 0 then
-        Dec(ParenDepth)
-      else
-      begin
-        IdentEnd := I - 1;
-        while (IdentEnd >= 1) and (LineStr[IdentEnd] in [' ', #9]) do
-          Dec(IdentEnd);
-        IdentStart := IdentEnd;
-        while (IdentStart >= 1) and
-              (((LineStr[IdentStart] >= 'A') and (LineStr[IdentStart] <= 'Z')) or
-               ((LineStr[IdentStart] >= 'a') and (LineStr[IdentStart] <= 'z')) or
-               ((LineStr[IdentStart] >= '0') and (LineStr[IdentStart] <= '9')) or
-               (LineStr[IdentStart] = '_')) do
-          Dec(IdentStart);
-        ACalleeIdent := Copy(LineStr, IdentStart + 1, IdentEnd - IdentStart);
-        AActiveParam := Commas;
-        Exit;
-      end;
-    end
-    else if (ParenDepth = 0) and ((LineStr[I] = ',') or (LineStr[I] = ';')) then
-      Inc(Commas);
-    Dec(I);
-  end;
+  Result := FIndex.ResolveCompletions(AUri, DocPath, ADoc, APos);
 end;
 
 function TNikPascalLspServer.DoSignatureHelp(const AUri: string; ADoc: TLspDocument;
   const APos: TLspPosition; const ATriggerChar: string): TLspSignatureHelp;
 var
-  Callee: string;
-  ActiveParam: Integer;
+  DocPath: string;
 begin
   Result := Default(TLspSignatureHelp);
+  DocPath := ResolveDocFilePath(AUri, ADoc);
+  if IsManifestFilePath(DocPath) then
+    Exit;
   EnsureIndexedDoc(AUri, ADoc);
-  ExtractCallSiteBeforeCursor(ADoc, APos, Callee, ActiveParam);
-  if Callee <> '' then
-    Result := FIndex.ResolveSignatureHelp(AUri, Callee, ActiveParam);
+  Result := FIndex.ResolveSignatureHelp(AUri, DocPath, ADoc, APos);
 end;
 
 end.

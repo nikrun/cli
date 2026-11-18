@@ -70,11 +70,16 @@ $BuiltExe = ""
 if (-not $ManifestOnly) {
     $SrcDir            = [System.IO.Path]::Combine($RootDir, 'src')
     $LspProtocolSrcDir = [System.IO.Path]::Combine($RootDir, 'lsp-protocol', 'src')
+    $LazUtilsDir       = [System.IO.Path]::Combine($RootDir, 'vendor', 'lazarus', 'components', 'lazutils')
+    $CodeToolsDir      = [System.IO.Path]::Combine($RootDir, 'vendor', 'lazarus', 'components', 'codetools')
     $BinOutDir         = [System.IO.Path]::Combine($RootDir, 'bin')
     $EntryPas          = [System.IO.Path]::Combine($SrcDir, 'nik.pas')
 
     if (-not (Test-Path $LspProtocolSrcDir)) {
         throw "nikrun-lsp-protocol source directory not found at: $LspProtocolSrcDir"
+    }
+    if (-not (Test-Path ([System.IO.Path]::Combine($CodeToolsDir, 'codetoolmanager.pas')))) {
+        throw "Lazarus CodeTools submodule not found at: $CodeToolsDir (run 'git submodule update --init --depth 1')."
     }
 
     $IsWinHost = if (Get-Variable -Name IsWindows -ErrorAction SilentlyContinue) {
@@ -203,6 +208,10 @@ if (-not $ManifestOnly) {
         $DefineFlag,
         '-dNIK_HAS_BUILD_VERSION',
         "-Fi$CacheDir",
+        "-Fu$LazUtilsDir",
+        "-Fi$LazUtilsDir",
+        "-Fu$CodeToolsDir",
+        "-Fi$CodeToolsDir",
         "-Fu$LspProtocolSrcDir",
         "-Fu$SrcDir",
         "-FE$BinOutDir",

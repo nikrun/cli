@@ -33,6 +33,8 @@ type
     Mode: string;
     ModeSwitches: TStringArray;
     LongStrings: Boolean;
+    ManifestFiles: TStringArray;
+    ConfigFingerprint: string;
     CacheDir: string;
   end;
 
@@ -88,6 +90,8 @@ function ResolveLspWorkspace(const ARootDir, AManifestOverride, AProfileName: st
 function ValidateManifestTextForLsp(const AManifestPath, AText, AProfileName: string;
   out ADiagnostics: TLspDiagnosticArray): Boolean;
 
+procedure EnsureFreshLspCompilerCache(const AContext: TNikWorkspaceContext);
+
 procedure SyncOpenDocumentsOverlay(const AContext: TNikWorkspaceContext;
   ADocStore: TLspDocumentStore; out AEntries: TNikOverlayFileEntryArray);
 
@@ -101,7 +105,7 @@ function RunLspSyntaxAndSemanticCheck(const AContext: TNikWorkspaceContext;
 implementation
 
 uses
-  nik.platform, nik.paths, nik.fs, nik.sdk.config, nik.sdk.manager,
+  nik.platform, nik.paths, nik.fs, nik.sha256, nik.sdk.config, nik.sdk.manager,
   nik.manifest.io, nik.manifest.resolve, nik.project, nikrun.lsp.utf16;
 
 procedure AppendArg(var AArgs: TStringArray; const AArg: string);
@@ -191,6 +195,29 @@ begin
   Result := IntToHex(H, 8);
 end;
 
+function DiskFileHasUtf8Bom(const AFilePath: string): Boolean;
+var
+  FS: TFileStream;
+  Bom: array[0..2] of Byte;
+begin
+  Result := False;
+  if (AFilePath = '') or (not FileExists(AFilePath)) then
+    Exit;
+  try
+    FS := TFileStream.Create(AFilePath, fmOpenRead or fmShareDenyNone);
+    try
+      if FS.Size < 3 then
+        Exit(False);
+      FS.ReadBuffer(Bom[0], 3);
+      Result := (Bom[0] = $EF) and (Bom[1] = $BB) and (Bom[2] = $BF);
+    finally
+      FS.Free;
+    end;
+  except
+    Result := False;
+  end;
+end;
+
 function FileContentEquals(const AFilePath, AExpectedText: string): Boolean;
 var
   FS: TFileStream;
@@ -278,13 +305,119 @@ begin
   end;
 end;
 
+function ComputeLspContextFingerprint(const AContext: TNikWorkspaceContext): string;
+var
+  Payload, MPath, MHash: string;
+  I: Integer;
+begin
+  Payload := 'nik-lsp-cache-v1' + #10 +
+             'compiler=' + AContext.CompilerBinary + #10 +
+             'fpccfg=' + AContext.FpcCfgPath + #10 +
+             'profile=' + AContext.ProfileName + #10 +
+             'mode=' + AContext.Mode + #10 +
+             'longstrings=' + BoolToStr(AContext.LongStrings, True) + #10;
+
+  for I := 0 to High(AContext.ManifestFiles) do
+  begin
+    MPath := AContext.ManifestFiles[I];
+    if (MPath <> '') and FileExists(MPath) then
+    begin
+      try
+        MHash := Sha256FileHex(MPath);
+      except
+        MHash := 'unreadable';
+      end;
+    end
+    else
+      MHash := 'missing';
+    Payload := Payload + 'manifest:' + MPath + '=' + MHash + #10;
+  end;
+
+  for I := 0 to High(AContext.ModeSwitches) do
+    Payload := Payload + 'modeswitch:' + AContext.ModeSwitches[I] + #10;
+  for I := 0 to High(AContext.Defines) do
+    Payload := Payload + 'define:' + AContext.Defines[I] + #10;
+  for I := 0 to High(AContext.Undefines) do
+    Payload := Payload + 'undefine:' + AContext.Undefines[I] + #10;
+  for I := 0 to High(AContext.IncludePaths) do
+    Payload := Payload + 'inc:' + AContext.IncludePaths[I] + #10;
+  for I := 0 to High(AContext.UnitPaths) do
+    Payload := Payload + 'unit:' + AContext.UnitPaths[I] + #10;
+
+  Result := Sha256StringHex(RawByteString(Payload));
+end;
+
+procedure PurgeLspCompiledUnits(const ACacheDir: string);
+var
+  SR: TSearchRec;
+  FullItem: string;
+begin
+  if (ACacheDir = '') or (not DirectoryExists(ACacheDir)) then
+    Exit;
+
+  if FindFirst(IncludeTrailingPathDelimiter(ACacheDir) + AllFilesMask, faAnyFile, SR) = 0 then
+  begin
+    try
+      repeat
+        if (SR.Name = '.') or (SR.Name = '..') then
+          Continue;
+        if (SR.Attr and faDirectory) <> 0 then
+          Continue;
+        // Preserve CodeTools probe/cache files inside the shared -lsp cache directory
+        if SameText(SR.Name, 'codetools-config.xml') or
+           SameText(SR.Name, '_nik_ct_probe.pas') or
+           SameText(SR.Name, '.nik-cache-fingerprint') then
+          Continue;
+        FullItem := IncludeTrailingPathDelimiter(ACacheDir) + SR.Name;
+        SysUtils.DeleteFile(FullItem);
+      until FindNext(SR) <> 0;
+    finally
+      FindClose(SR);
+    end;
+  end;
+end;
+
+procedure EnsureFreshLspCompilerCache(const AContext: TNikWorkspaceContext);
+var
+  ExpectedFp, FingerprintPath, ExistingFp: string;
+begin
+  if AContext.CacheDir = '' then
+    Exit;
+
+  ExpectedFp := AContext.ConfigFingerprint;
+  if ExpectedFp = '' then
+    ExpectedFp := ComputeLspContextFingerprint(AContext);
+
+  EnsureDirExists(AContext.CacheDir);
+  FingerprintPath := JoinPath(AContext.CacheDir, '.nik-cache-fingerprint');
+  ExistingFp := '';
+  if FileExists(FingerprintPath) then
+  begin
+    try
+      ExistingFp := Trim(ReadFileTextUtf8(FingerprintPath));
+    except
+      ExistingFp := '';
+    end;
+  end;
+
+  if ExistingFp = ExpectedFp then
+    Exit;
+
+  PurgeLspCompiledUnits(AContext.CacheDir);
+  try
+    WriteFileTextUtf8(FingerprintPath, ExpectedFp + LineEnding);
+  except
+    // Non-fatal if fingerprint metadata cannot be written
+  end;
+end;
+
 procedure SyncOpenDocumentsOverlay(const AContext: TNikWorkspaceContext;
   ADocStore: TLspDocumentStore; out AEntries: TNikOverlayFileEntryArray);
 var
-  OverlayRoot, ProjPrefix, OrigPath, RelSubpath, OverlayPath: string;
+  OverlayRoot, ProjPrefix, OrigPath, RelSubpath, OverlayPath, EffectiveOverlayBytes: string;
   I, OutCount: Integer;
   Doc: TLspDocument;
-  InsideProject: Boolean;
+  InsideProject, HasLeadingBom: Boolean;
 begin
   AEntries := nil;
   if AContext.CacheDir = '' then
@@ -318,11 +451,20 @@ begin
       else
         RelSubpath := JoinPath(JoinPath('_ext', Fnv1aHex32(ExtractFileDir(OrigPath))), ExtractFileName(OrigPath));
 
+      // Preserve original disk UTF-8 BOM on overlay files (VS Code strips BOM in didOpen/didChange,
+      // which otherwise triggers FPC error 2089 when an open unit includes a BOM-prefixed .inc file on disk).
+      HasLeadingBom := (Length(Doc.Text) >= 3) and
+                       (Doc.Text[1] = #$EF) and (Doc.Text[2] = #$BB) and (Doc.Text[3] = #$BF);
+      if (not HasLeadingBom) and DiskFileHasUtf8Bom(OrigPath) then
+        EffectiveOverlayBytes := #$EF#$BB#$BF + Doc.Text
+      else
+        EffectiveOverlayBytes := Doc.Text;
+
       OverlayPath := JoinPath(OverlayRoot, RelSubpath);
-      if not FileContentEquals(OverlayPath, Doc.Text) then
+      if not FileContentEquals(OverlayPath, EffectiveOverlayBytes) then
       begin
         try
-          WriteOverlayFileUtf8(OverlayPath, Doc.Text);
+          WriteOverlayFileUtf8(OverlayPath, EffectiveOverlayBytes);
         except
           Continue;
         end;
@@ -467,6 +609,7 @@ begin
   if ManifestFile <> '' then
   begin
     AContext.ManifestPath := ExpandFileName(NormalizeNativeSeparators(ManifestFile));
+    AppendArg(AContext.ManifestFiles, AContext.ManifestPath);
     AContext.ProjectDir := ExcludeTrailingPathDelimiter(ExtractFileDir(AContext.ManifestPath));
     try
       Parsed := LoadManifestFile(AContext.ManifestPath);
@@ -518,6 +661,7 @@ begin
         else if FileExists(DepYml) then DepChosen := DepYml;
         if DepChosen <> '' then
         begin
+          AppendArg(AContext.ManifestFiles, ExpandFileName(NormalizeNativeSeparators(DepChosen)));
           try
             DepParsed := LoadManifestFile(DepChosen);
             DepCfg := ResolveManifestConfig(DepParsed, 'debug',
@@ -574,6 +718,7 @@ begin
       JoinPath(JoinPath(AContext.ProjectDir, '.nik'), 'cache'),
       SanitizeCacheKey(AContext.Sdk.Manifest.SdkId + '-' + AContext.ProfileName + '-lsp')
     );
+    AContext.ConfigFingerprint := ComputeLspContextFingerprint(AContext);
     Result := FileExists(AContext.CompilerBinary);
   except
     on E: Exception do
@@ -786,8 +931,8 @@ end;
 function TNikAsyncCompilerCheck.MapOverlayPathToRealPath(const ADiagFilePath: string;
   out AClientUri: string): string;
 var
-  SlashLower, Suffix: string;
-  I: Integer;
+  SlashLower, Suffix, BaseName: string;
+  I, MatchIdx, MatchCount: Integer;
 begin
   AClientUri := '';
   Result := ADiagFilePath;
@@ -809,6 +954,33 @@ begin
     begin
       AClientUri := FOverlayEntries[I].ClientUri;
       Exit(FOverlayEntries[I].OrigPath);
+    end;
+  end;
+
+  // Fallback when FPC omits directory paths on module-level fatal lines (e.g. bare 'OrderDomain.pas')
+  if not FileExists(Result) then
+  begin
+    BaseName := ExtractFileName(ADiagFilePath);
+    if BaseName <> '' then
+    begin
+      if (FOwnerFilePath <> '') and SameText(BaseName, ExtractFileName(FOwnerFilePath)) then
+      begin
+        AClientUri := FOwnerUri;
+        Exit(FOwnerFilePath);
+      end;
+      MatchIdx := -1;
+      MatchCount := 0;
+      for I := 0 to High(FOverlayEntries) do
+        if SameText(BaseName, ExtractFileName(FOverlayEntries[I].OrigPath)) then
+        begin
+          MatchIdx := I;
+          Inc(MatchCount);
+        end;
+      if MatchCount = 1 then
+      begin
+        AClientUri := FOverlayEntries[MatchIdx].ClientUri;
+        Exit(FOverlayEntries[MatchIdx].OrigPath);
+      end;
     end;
   end;
 end;
@@ -856,6 +1028,9 @@ begin
   begin
     D := Parsed.Diagnostics[I];
     if D.FilePath = '' then
+      Continue;
+    // Suppress redundant FPC stop-summary line ("There were N errors compiling module, stopping")
+    if (D.Code = 10026) and (Length(Parsed.Diagnostics) > 1) then
       Continue;
 
     RealPath := MapOverlayPathToRealPath(D.FilePath, OverlayClientUri);
@@ -938,6 +1113,7 @@ begin
     Exit;
 
   EnsureDirExists(AContext.CacheDir);
+  EnsureFreshLspCompilerCache(AContext);
   SyncOpenDocumentsOverlay(AContext, ADocStore, OverlayEntries);
 
   TargetFile := '';

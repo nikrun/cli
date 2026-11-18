@@ -174,10 +174,12 @@ cli/
 │   ├── nik.compiler.pas         # Hermetic ppc* flag builder & compiler process runner
 │   ├── nik.project.pas          # Project target bridge (nik.manifest.* + nik.sdk.* -> TCompileSpec)
 │   ├── nik.cmd.build.pas        # `nik build` CLI parser & human/JSON output formatters
-│   ├── nik.lsp.index.pas        # Error-tolerant Object Pascal symbol & doc-comment indexer
+│   ├── nik.lsp.index.pas        # Lazarus CodeTools-backed Object Pascal AST, symbol & doc indexer
 │   ├── nik.lsp.check.pas        # Non-blocking ppc* -Cn workspace & unsaved-overlay check runner
 │   ├── nik.lsp.server.pas       # TNikPascalLspServer binding nikrun.lsp.server to Nikrun SDKs
 │   └── nik.cmd.lsp.pas          # `nik lsp` CLI parser (--stdio, --socket, --profile, --log-file)
+├── vendor/
+│   └── lazarus/                 # Shallow Lazarus submodule providing CodeTools & LazUtils
 ├── version.txt                  # Single source of truth SemVer (e.g. 0.1.0)
 ├── changelog.yml                # Structured Keep-a-Changelog release history
 ├── prepare.ps1                  # Provisions & verifies newest prebuilt Nikrun FPC SDK from nikrun/sdk
@@ -191,7 +193,7 @@ cli/
 
 ```powershell
 # 1. Initialize submodules & provision newest prebuilt Nikrun FPC SDK into ~/.nikrun (first-time setup)
-git submodule update --init --recursive
+git submodule update --init --recursive --depth 1
 .\prepare.ps1
 
 # 2. Full build, test & package pipeline (outputs ZIP, release-notes.json & manifest.json to .out/)

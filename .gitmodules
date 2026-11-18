@@ -2,3 +2,8 @@
 	path = build-lib
 	url = https://github.com/nikrun/build-lib.git
 	branch = main
+[submodule "vendor/lazarus"]
+	path = vendor/lazarus
+	url = https://gitlab.com/freepascal.org/lazarus/lazarus.git
+	branch = main
+	shallow = true
