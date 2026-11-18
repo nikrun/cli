@@ -5,42 +5,41 @@
   </picture>
 </p>
 
-# Nikrun — `nik` CLI (`nikrun/cli`)
+# Nikrun CLI
 
 [![Build and Test](https://github.com/nikrun/cli/actions/workflows/build.yml/badge.svg)](https://github.com/nikrun/cli/actions/workflows/build.yml)
-[![Build Portable FreePascal SDKs](https://github.com/nikrun/sdk/actions/workflows/build-fpc-sdk.yml/badge.svg)](https://github.com/nikrun/sdk/actions/workflows/build-fpc-sdk.yml)
+[![Build Portable Free Pascal SDKs](https://github.com/nikrun/sdk/actions/workflows/build-fpc-sdk.yml/badge.svg)](https://github.com/nikrun/sdk/actions/workflows/build-fpc-sdk.yml)
+[![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](./LICENSE)
+[![Website: nikrun.dev](https://img.shields.io/badge/website-nikrun.dev-0b0e14)](https://nikrun.dev)
 
-> **Modern, Zero-Config Toolchain & Developer Experience for Free Pascal**  
-> *(Named in tribute to [Niklaus Wirth](https://en.wikipedia.org/wiki/Niklaus_Wirth))*
+> **Zero-config toolchain, SDK manager, `nik.yaml` build system, package manager, and Language Server (`nik`) for Free Pascal.**
 
-**Nikrun** is an integrated developer ecosystem designed to bring a modern, cohesive workflow—familiar from ecosystems like Rust (`rustup` + `cargo`), Go, or the .NET CLI—to **Object Pascal / Free Pascal**.
+[nikrun.dev](https://nikrun.dev) · **[`nik` CLI](https://github.com/nikrun/cli)** · [Free Pascal SDKs](https://github.com/nikrun/sdk) · [VS Code Extension](https://github.com/nikrun/vscode) · [Website & Docs](https://github.com/nikrun/web) · [Brand Assets](https://github.com/nikrun/brand) · [Build Library](https://github.com/nikrun/build-lib)
 
-This repository contains the standalone **`nik` CLI** (`src/nik.*.pas`) and the zero-dependency **`nikrun-lsp-protocol`** library (`lsp-protocol/`).
+---
 
-### Nikrun Ecosystem Repositories
+**Nikrun** *(named in tribute to [Niklaus Wirth](https://en.wikipedia.org/wiki/Niklaus_Wirth))* brings the cohesive workflow of modern ecosystems like Rust (`rustup` + `cargo`) and Go to **Free Pascal & Object Pascal**. At its core sits the standalone **`nik` CLI** — a single native binary with zero external runtime dependencies that unites portable compiler SDKs, declarative `nik.yaml` builds, decentralized `nik.lock` packages, and a built-in Language Server strictly in user scope (`~/.nikrun`).
 
-- **[`nikrun/cli`](https://github.com/nikrun/cli)** *(this repository)* — Standalone `nik` CLI (`nik sdk`, `nik init`, `nik build`, `nik pkg`, `nik lsp`) and `nikrun-lsp-protocol`
-- **[`nikrun/sdk`](https://github.com/nikrun/sdk)** — Automated build pipeline and GitHub Releases (`latest`) for portable Free Pascal SDK archives (`3.2.2`, `3.2.4`, `3.2.5`, `3.3.1`)
-- **[`nikrun/vscode`](https://github.com/nikrun/vscode)** — Official `vscode-nikrun` Visual Studio Code extension for Object Pascal / Free Pascal
+This repository contains the **`nik` CLI** (`src/nik.*.pas`) and the standalone, zero-dependency **[`nikrun-lsp-protocol`](./lsp-protocol/README.md)** library (`lsp-protocol/`).
 
 ---
 
 ## Why Nikrun?
 
-- **Zero System Pollution:** Everything lives cleanly in user scope (`~/.nikrun`)—no administrator/root privileges, no global `PATH` conflicts, and no broken system-wide `fpc.cfg` files.
-- **Instant Multi-Version & Multi-Arch SDKs:** Switch seamlessly between Free Pascal versions (`3.2.2`, `3.2.4`, `3.3.1`) and CPU/OS targets (`win64`, `linux`, `darwin` on `x86_64` and `aarch64`) without compiling the compiler yourself.
-- **Declarative Projects (`nik.yaml`):** Define compiler requirements, build targets, profiles, and dependencies in one clean manifest instead of maintaining fragile shell scripts or manual unit search paths.
-- **Batteries-Included Tooling:** SDK management, scaffolding (`nik init`), hermetic compilation (`nik build`), and Language Server (`nik lsp`) all live inside a single native `nik` CLI binary with zero external runtime dependencies.
-- **Agent & CI Ready Out of the Box:** Deterministic `--json` output, checkout-local build caches (`.nik/cache/`), and automatic TTY/`NO_COLOR`/`CI` handling.
+- **Zero System Pollution:** Everything lives cleanly in user scope (`~/.nikrun`) — no administrator/root privileges, no global `PATH` conflicts, and no broken system-wide `/etc/fpc.cfg` files.
+- **Instant Multi-Version & Multi-Arch SDKs:** Switch in seconds between Free Pascal `3.2.2`, `3.2.4`, `fixes_3_2`, and nightly `3.3.1` natively across Windows, Linux, and macOS (`x86_64` & `aarch64`) without compiling the compiler yourself.
+- **Declarative Projects & Packages (`nik.yaml`):** One clean manifest replaces brittle build scripts, flag chains, and opaque XML project files — complete with profiles, OS/CPU overlays, and SHA-256 lockfile-pinned packages (`nik.lock`).
+- **One Binary, Zero Bloat:** SDK management (`nik sdk`), scaffolding (`nik init`), package resolution (`nik pkg`), hermetic direct-`ppc*` compilation (`nik build`), and the built-in Language Server (`nik lsp`) ship inside one native Object Pascal binary.
+- **Built for CI/CD & AI Agents:** Deterministic `--json` output, isolated worktree-safe build caches (`.nik/cache/`), and automatic TTY/`NO_COLOR`/`CI` detection make automation effortless.
 
 ### How Nikrun Compares
 
-| Aspect | Official `freepascal.org` Downloads | `fpcupdeluxe` | Nikrun |
+| Aspect | Official `freepascal.org` Installers | `fpcupdeluxe` | **Nikrun** |
 | :--- | :--- | :--- | :--- |
-| **Setup & Isolation** | Global OS installers (`.exe` wizard, root `.pkg`, interactive `install.sh` + `/etc/fpc.cfg`) | GUI/CLI builder that compiles FPC & Lazarus from source on your machine | **Zero-config, user-scope `nik` CLI + prebuilt portable `.zip` SDKs** (`~/.nikrun`) |
-| **Versions & Nightly Trunk** | Rare static releases (`3.2.2` is from 2021); parallel installs collide in global `PATH` / `fpc.cfg` | Supports branches/trunk, but requires long local source builds and host build tools | **Instant side-by-side installs** of `3.2.2`, `3.2.4`, `fixes_3_2`, and nightly `3.3.1` in seconds |
-| **Modern OS & CPU Support** | No native `aarch64-win64` download; `3.2.2` often fails out-of-the-box on modern macOS/Xcode sysroots | Relies on local source patches and third-party bootstrap binaries | **Works out of the box** on Win/Linux/macOS (`x86_64` & `aarch64`, incl. native Windows ARM64) via isolated `fpc.cfg` |
-| **Sources, Tooling & CI** | Compiler distribution only (sources often separate; no manifest, package manager, or CI automation) | Toolchain & Lazarus IDE installer | **Unified workflow:** bundled `rtl`/`packages` sources, `nik.yaml`, `nik init`/`build`, `nik lsp`, `--json` & CI ready |
+| **Setup & System Impact** | Global OS installers (admin/root required, global `/etc/fpc.cfg` & `PATH`) | GUI/CLI builder that compiles FPC & Lazarus locally from source | **100% user scope (`~/.nikrun`)**, zero admin rights, prebuilt portable SDKs |
+| **Versions & Nightly Trunk** | Infrequent static releases; parallel installs easily collide | Supports branches/trunk, but requires long local builds & host tools | **`3.2.2`, `3.2.4`, `fixes_3_2` & nightly `3.3.1` side by side in seconds** |
+| **Modern OS & ARM64** | No native Windows ARM64 download; sysroot hurdles on modern macOS | Relies on local source patches & bootstrap binaries | **Works out of the box on Win, Linux & macOS (`x86_64` & `aarch64`, incl. Win ARM64)** |
+| **Project, IDE & Automation** | Compiler distribution only (sources often separate; no manifest or LSP) | Focused on toolchain building & Lazarus IDE | **End-to-end:** bundled RTL sources, `nik.yaml`, `nik pkg`, `nik build`, `nik lsp`, VS Code & `--json` |
 
 ---
 
@@ -48,13 +47,14 @@ This repository contains the standalone **`nik` CLI** (`src/nik.*.pas`) and the 
 
 ```mermaid
 flowchart TB
-    VSC["VS Code Extension (nikrun/vscode)"]
+    VSC["Nikrun for VS Code (nikrun/vscode)"]
     USER["Developer / AI Agent (Terminal)"]
-    MANIFEST["nik.yaml (Project Manifest)"]
+    MANIFEST["nik.yaml & nik.lock"]
 
     subgraph NIK["nik CLI (nikrun/cli)"]
         SDKM["SDK Manager (nik sdk)"]
         INIT["Project Scaffolder (nik init)"]
+        PKG["Package Engine (nik pkg)"]
         BUILD["Build Engine (nik build)"]
         LSP["Language Server (nik lsp)"]
     end
@@ -72,6 +72,7 @@ flowchart TB
     VSC --> BUILD
     VSC --> SDKM
 
+    MANIFEST --> PKG
     MANIFEST --> BUILD
     MANIFEST --> LSP
 
@@ -84,14 +85,15 @@ flowchart TB
 
 ---
 
-## Quick Start & Usage
+## Quick Start
 
 ```bash
 # Discover & manage Free Pascal SDKs (published by nikrun/sdk)
 nik sdk list                     # List locally installed SDKs
 nik sdk list --remote            # Browse available prebuilt SDKs across versions & architectures
-nik sdk install 3.2.4            # Download, SHA-256 verify, and configure FPC 3.2.4
-nik sdk install 3.3.1            # Install FPC 3.3.1 alongside 3.2.4
+nik sdk install 3.2.4            # Download, SHA-256 verify, and configure Free Pascal 3.2.4
+nik sdk install 3.3.1            # Install Free Pascal 3.3.1 alongside 3.2.4
+nik sdk update                   # Update installed SDKs to the newest prebuilt commits
 nik sdk info 3.3.1               # Inspect SDK health and verified toolchain paths (--json supported)
 nik sdk uninstall 3.3.1          # Remove an installed SDK
 
@@ -160,6 +162,7 @@ cli/
 │   └── workflows/
 │       ├── build.yml            # Multi-OS / Multi-Arch CI build & integration test matrix
 │       └── release.yml          # Stable & Insider release workflow + auto version bump PRs
+├── brand/                       # Shared Nikrun brand & icon assets (Git submodule)
 ├── build-lib/                   # Shared Nikrun build & release library (Git submodule)
 ├── lsp-protocol/                # Standalone, zero-dependency LSP 3.17 & JSON-RPC 2.0 library
 │   ├── src/nikrun.lsp.*.pas
@@ -209,10 +212,10 @@ cli/
 
 ---
 
-## Building & Testing Locally
+## Development & Testing
 
 ```powershell
-# 1. Initialize submodules & provision newest prebuilt Nikrun FPC SDK into ~/.nikrun (first-time setup)
+# 1. Initialize submodules & provision newest prebuilt Nikrun Free Pascal SDK into ~/.nikrun (first-time setup)
 git submodule update --init --recursive --depth 1
 .\prepare.ps1
 
@@ -245,4 +248,4 @@ Copyright (c) 2026 The Nikrun Contributors.
 
 Licensed under the **GNU General Public License v3.0 or later** (`GPL-3.0-or-later`) — see [LICENSE](./LICENSE).
 
-> **Note on Projects Built with `nik`:** Using `nik` to initialize (`nik init`), analyze (`nik lsp`), or compile (`nik build`) your own Object Pascal applications, libraries, or packages imposes **no** licensing restrictions on your source code or compiled binaries. You remain free to license and distribute your own projects under any open-source or commercial/proprietary terms.
+> **Note on Projects Built with Nikrun:** Using `nik` or **Nikrun for VS Code** to initialize (`nik init`), analyze (`nik lsp`), or compile (`nik build`) your own Free Pascal & Object Pascal applications, libraries, or packages imposes **no** licensing restrictions on your source code or compiled binaries. You remain free to license and distribute your own projects under any open-source or commercial/proprietary terms.
