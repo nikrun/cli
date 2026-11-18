@@ -5,7 +5,7 @@ unit nik.project;
 interface
 
 uses
-  SysUtils, nik.types, nik.manifest.types, nik.compiler.types;
+  SysUtils, nik.types, nik.manifest.types, nik.compiler.types, nik.pkg.types;
 
 type
   TProjectTargetRole = (ptrMainArtifact, ptrTestRunner);
@@ -19,18 +19,22 @@ type
     CacheSuffix: string;
     Clean: Boolean;
     CheckOnly: Boolean;
+    Locked: Boolean;
+    Offline: Boolean;
   end;
 
   TPreparedProjectTarget = record
     Options: TProjectTargetOptions;
     Manifest: TResolvedManifest;
     Sdk: TInstalledSdk;
+    Packages: TPackageResolutionResult;
     Compile: TPreparedCompile;
   end;
 
   TProjectCompileResult = record
     Manifest: TResolvedManifest;
     Sdk: TInstalledSdk;
+    Packages: TPackageResolutionResult;
     Compile: TCompileResult;
   end;
 
@@ -40,6 +44,7 @@ function ResolveOutputBinaryPath(const AProjectDir, ARawOutput, ATargetOs: strin
 
 function BuildCompileSpecFromManifest(const AManifest: TResolvedManifest;
   const ASdk: TInstalledSdk; const AFpcCfgPath: string;
+  const APackages: TPackageResolutionResult;
   AArtifactKind: TCompileArtifactKind; AClean: Boolean;
   const ACacheSuffix: string = ''): TCompileSpec;
 
@@ -50,7 +55,8 @@ function CompileProjectTarget(const AOptions: TProjectTargetOptions): TProjectCo
 implementation
 
 uses
-  nik.platform, nik.paths, nik.sdk.config, nik.sdk.manager, nik.manifest.io, nik.manifest.resolve, nik.compiler;
+  nik.platform, nik.paths, nik.sdk.config, nik.sdk.manager,
+  nik.manifest.io, nik.manifest.resolve, nik.compiler, nik.pkg.resolve;
 
 function SanitizeCacheKey(const ARaw: string): string;
 var
@@ -96,77 +102,18 @@ begin
   APaths[N] := Clean;
 end;
 
-procedure ResolveDependenciesPaths(const AManifest: TResolvedManifest;
-  const ATargetCpu, ATargetOs: string;
-  var AUnitPaths, AIncludePaths, ALibPaths, AObjPaths, AManifestFiles: TStringArray);
+procedure AppendUniqueLinkLib(var ALibs: TStringArray; const ALib: string);
 var
-  I, J: Integer;
-  Dep: TDependencySpec;
-  DepDir, DepManifestYaml, DepManifestYml, ChosenManifest: string;
-  DepManifest: TParsedManifest;
-  DepResolved: TResolvedManifest;
+  I, N: Integer;
 begin
-  for I := 0 to High(AManifest.Dependencies) do
-  begin
-    Dep := AManifest.Dependencies[I];
-    if Trim(Dep.Path) = '' then
-      raise ENikError.CreateFmt(
-        '%s:%d: Dependency ''%s'' uses a remote version/git source, which requires the upcoming ''nik install'' package manager. Use ''path: <dir>'' for local dependencies.',
-        [AManifest.ManifestPath, Dep.DefinedLine, Dep.Name]);
-
-    DepDir := ResolveRelativePath(AManifest.ProjectDir, Dep.Path);
-    if not DirectoryExists(DepDir) then
-      raise ENikError.CreateFmt(
-        '%s:%d: Path for dependency ''%s'' does not exist: %s',
-        [AManifest.ManifestPath, Dep.DefinedLine, Dep.Name, DepDir]);
-
-    if (Length(Dep.UnitPaths) > 0) or (Length(Dep.IncludePaths) > 0) then
-    begin
-      for J := 0 to High(Dep.UnitPaths) do
-        AppendUniquePath(AUnitPaths, ResolveRelativePath(DepDir, Dep.UnitPaths[J]));
-      for J := 0 to High(Dep.IncludePaths) do
-        AppendUniquePath(AIncludePaths, ResolveRelativePath(DepDir, Dep.IncludePaths[J]));
-      Continue;
-    end;
-
-    DepManifestYaml := JoinPath(DepDir, 'nik.yaml');
-    DepManifestYml := JoinPath(DepDir, 'nik.yml');
-    ChosenManifest := '';
-    if FileExists(DepManifestYaml) then
-      ChosenManifest := DepManifestYaml
-    else if FileExists(DepManifestYml) then
-      ChosenManifest := DepManifestYml;
-
-    if ChosenManifest <> '' then
-    begin
-      AppendUniquePath(AManifestFiles, ExpandFileName(ChosenManifest));
-      DepManifest := LoadManifestFile(ChosenManifest);
-      DepResolved := ResolveManifestConfig(DepManifest, 'debug', ATargetCpu, ATargetOs, False, False);
-      if (Length(DepResolved.UnitPaths) > 0) or (Length(DepResolved.IncludePaths) > 0) or
-         (Length(DepResolved.LibraryPaths) > 0) or (Length(DepResolved.ObjectPaths) > 0) or
-         (Length(DepResolved.ResourcePaths) > 0) then
-      begin
-        for J := 0 to High(DepResolved.UnitPaths) do
-          AppendUniquePath(AUnitPaths, ResolveRelativePath(DepDir, DepResolved.UnitPaths[J]));
-        for J := 0 to High(DepResolved.IncludePaths) do
-          AppendUniquePath(AIncludePaths, ResolveRelativePath(DepDir, DepResolved.IncludePaths[J]));
-        for J := 0 to High(DepResolved.LibraryPaths) do
-          AppendUniquePath(ALibPaths, ResolveRelativePath(DepDir, DepResolved.LibraryPaths[J]));
-        for J := 0 to High(DepResolved.ObjectPaths) do
-          AppendUniquePath(AObjPaths, ResolveRelativePath(DepDir, DepResolved.ObjectPaths[J]));
-        for J := 0 to High(DepResolved.ResourcePaths) do
-        begin
-          AppendUniquePath(AIncludePaths, ResolveRelativePath(DepDir, DepResolved.ResourcePaths[J]));
-          AppendUniquePath(AObjPaths, ResolveRelativePath(DepDir, DepResolved.ResourcePaths[J]));
-        end;
-        Continue;
-      end;
-    end;
-
-    // Raw Pascal directory (e.g. LazUtils): expose both .pas units and .inc files
-    AppendUniquePath(AUnitPaths, DepDir);
-    AppendUniquePath(AIncludePaths, DepDir);
-  end;
+  if ALib = '' then
+    Exit;
+  for I := 0 to High(ALibs) do
+    if ALibs[I] = ALib then
+      Exit;
+  N := Length(ALibs);
+  SetLength(ALibs, N + 1);
+  ALibs[N] := ALib;
 end;
 
 function EnsureLibPrefix(const ABaseName: string): string;
@@ -284,12 +231,13 @@ end;
 
 function BuildCompileSpecFromManifest(const AManifest: TResolvedManifest;
   const ASdk: TInstalledSdk; const AFpcCfgPath: string;
+  const APackages: TPackageResolutionResult;
   AArtifactKind: TCompileArtifactKind; AClean: Boolean;
   const ACacheSuffix: string): TCompileSpec;
 var
   I: Integer;
   CacheKey, SuffixClean: string;
-  EffUnitPaths, EffIncludePaths, EffLibPaths, EffObjPaths, EffManifestFiles: TStringArray;
+  EffUnitPaths, EffIncludePaths, EffLibPaths, EffObjPaths, EffManifestFiles, EffLinkLibs: TStringArray;
 begin
   Result := Default(TCompileSpec);
 
@@ -341,8 +289,16 @@ begin
     AppendUniquePath(EffObjPaths, ResolveRelativePath(AManifest.ProjectDir, AManifest.ResourcePaths[I]));
   end;
 
-  ResolveDependenciesPaths(AManifest, ASdk.Manifest.TargetCpu, ASdk.Manifest.TargetOs,
-    EffUnitPaths, EffIncludePaths, EffLibPaths, EffObjPaths, EffManifestFiles);
+  for I := 0 to High(APackages.UnitPaths) do
+    AppendUniquePath(EffUnitPaths, APackages.UnitPaths[I]);
+  for I := 0 to High(APackages.IncludePaths) do
+    AppendUniquePath(EffIncludePaths, APackages.IncludePaths[I]);
+  for I := 0 to High(APackages.LibraryPaths) do
+    AppendUniquePath(EffLibPaths, APackages.LibraryPaths[I]);
+  for I := 0 to High(APackages.ObjectPaths) do
+    AppendUniquePath(EffObjPaths, APackages.ObjectPaths[I]);
+  for I := 0 to High(APackages.ManifestFiles) do
+    AppendUniquePath(EffManifestFiles, APackages.ManifestFiles[I]);
 
   Result.UnitPaths := EffUnitPaths;
   Result.IncludePaths := EffIncludePaths;
@@ -401,7 +357,10 @@ begin
   Result.SmartLink := AManifest.SmartLink;
   Result.HasStripSymbols := AManifest.HasStripSymbols;
   Result.StripSymbols := AManifest.StripSymbols;
-  Result.LinkLibraries := Copy(AManifest.LinkLibraries);
+  EffLinkLibs := Copy(AManifest.LinkLibraries);
+  for I := 0 to High(APackages.LinkLibraries) do
+    AppendUniqueLinkLib(EffLinkLibs, APackages.LinkLibraries[I]);
+  Result.LinkLibraries := EffLinkLibs;
   Result.LinkerArgs := Copy(AManifest.LinkerArgs);
   Result.ExtraArgs := Copy(AManifest.FpcArgs);
 end;
@@ -412,6 +371,7 @@ var
   ParsedManifest: TParsedManifest;
   ForTest, RequireManifestEntry: Boolean;
   ArtifactKind: TCompileArtifactKind;
+  PkgOpts: TPackageResolveOptions;
   Spec: TCompileSpec;
 begin
   Result := Default(TPreparedProjectTarget);
@@ -453,10 +413,19 @@ begin
   if Trim(AOptions.OutputOverride) <> '' then
     Result.Manifest.Output := Trim(AOptions.OutputOverride);
 
-  // 4. Translate resolved manifest + SDK into neutral TCompileSpec & prepare compiler invocation
+  // 4. Resolve direct & transitive local/remote/archive dependencies (auto-hydrating cache & nik.lock)
+  PkgOpts := Default(TPackageResolveOptions);
+  PkgOpts.Locked := AOptions.Locked;
+  PkgOpts.Offline := AOptions.Offline;
+  PkgOpts.AllowLockWrite := (not AOptions.Locked) and (not AOptions.Offline);
+  PkgOpts.IncludeTestDeps := ForTest;
+  Result.Packages := ResolveProjectPackages(ParsedManifest, Result.Manifest,
+    Result.Sdk.Manifest.TargetCpu, Result.Sdk.Manifest.TargetOs, PkgOpts);
+
+  // 5. Translate resolved manifest + SDK + packages into neutral TCompileSpec & prepare compiler invocation
   ArtifactKind := ResolveTargetArtifactKind(AOptions.Role, Result.Manifest.Kind, AOptions.CheckOnly);
   Spec := BuildCompileSpecFromManifest(Result.Manifest, Result.Sdk, FpcCfgPath,
-    ArtifactKind, AOptions.Clean, AOptions.CacheSuffix);
+    Result.Packages, ArtifactKind, AOptions.Clean, AOptions.CacheSuffix);
 
   Result.Compile := PrepareCompile(Spec);
 end;
@@ -466,6 +435,7 @@ begin
   Result := Default(TProjectCompileResult);
   Result.Manifest := APrepared.Manifest;
   Result.Sdk := APrepared.Sdk;
+  Result.Packages := APrepared.Packages;
   Result.Compile := ExecuteCompile(APrepared.Compile);
 end;
 

@@ -106,7 +106,8 @@ implementation
 
 uses
   nik.platform, nik.paths, nik.fs, nik.sha256, nik.sdk.config, nik.sdk.manager,
-  nik.manifest.io, nik.manifest.resolve, nik.project, nikrun.lsp.utf16;
+  nik.manifest.io, nik.manifest.resolve, nik.project,
+  nik.pkg.types, nik.pkg.resolve, nikrun.lsp.utf16;
 
 procedure AppendArg(var AArgs: TStringArray; const AArg: string);
 var
@@ -581,14 +582,13 @@ end;
 function ResolveLspWorkspace(const ARootDir, AManifestOverride, AProfileName: string;
   out AContext: TNikWorkspaceContext; out AWarningMsg: string): Boolean;
 var
-  ManifestFile, EffProfile, CleanErr: string;
+  ManifestFile, EffProfile, CleanErr, FallbackHostVer: string;
   Parsed: TParsedManifest;
   ResolvedCfg: TResolvedManifest;
   ForTestFlag, LoadedFromManifest: Boolean;
-  I, J, ErrLine0: Integer;
-  DepDir, DepYaml, DepYml, DepChosen: string;
-  DepParsed: TParsedManifest;
-  DepCfg: TResolvedManifest;
+  I, ErrLine0: Integer;
+  PkgOpts: TPackageResolveOptions;
+  PkgRes: TPackageResolutionResult;
 begin
   AContext := Default(TNikWorkspaceContext);
   AWarningMsg := '';
@@ -623,6 +623,8 @@ begin
         Parsed, EffProfile, GetHostCpu, GetHostOs, ForTestFlag, Parsed.Kind <> mkPackage
       );
 
+      if (Trim(ResolvedCfg.FpcSpec) = '') and TryDetectInstalledHostVersion(FallbackHostVer) then
+        ResolvedCfg.FpcSpec := FallbackHostVer;
       AContext.Sdk := RequireInstalledSdkForTarget(ResolvedCfg.FpcSpec, ResolvedCfg.TargetSpec);
       ResolvedCfg := ResolveManifestConfig(
         Parsed, EffProfile,
@@ -646,40 +648,32 @@ begin
       for I := 0 to High(ResolvedCfg.IncludePaths) do
         AppendUniqueDir(AContext.IncludePaths, ResolveRelativePath(AContext.ProjectDir, ResolvedCfg.IncludePaths[I]));
 
-      // Local path dependencies (ignore broken dependency manifests gracefully instead of aborting LSP)
-      for I := 0 to High(ResolvedCfg.Dependencies) do
-      begin
-        if Trim(ResolvedCfg.Dependencies[I].Path) = '' then
-          Continue;
-        DepDir := ResolveRelativePath(AContext.ProjectDir, ResolvedCfg.Dependencies[I].Path);
-        if not DirectoryExists(DepDir) then
-          Continue;
-        DepYaml := JoinPath(DepDir, 'nik.yaml');
-        DepYml := JoinPath(DepDir, 'nik.yml');
-        DepChosen := '';
-        if FileExists(DepYaml) then DepChosen := DepYaml
-        else if FileExists(DepYml) then DepChosen := DepYml;
-        if DepChosen <> '' then
-        begin
-          AppendArg(AContext.ManifestFiles, ExpandFileName(NormalizeNativeSeparators(DepChosen)));
-          try
-            DepParsed := LoadManifestFile(DepChosen);
-            DepCfg := ResolveManifestConfig(DepParsed, 'debug',
-              AContext.Sdk.Manifest.TargetCpu, AContext.Sdk.Manifest.TargetOs, False, False);
-            for J := 0 to High(DepCfg.UnitPaths) do
-              AppendUniqueDir(AContext.UnitPaths, ResolveRelativePath(DepDir, DepCfg.UnitPaths[J]));
-            for J := 0 to High(DepCfg.IncludePaths) do
-              AppendUniqueDir(AContext.IncludePaths, ResolveRelativePath(DepDir, DepCfg.IncludePaths[J]));
-          except
-            AppendUniqueDir(AContext.UnitPaths, DepDir);
-            AppendUniqueDir(AContext.IncludePaths, DepDir);
-          end;
-        end
-        else
-        begin
-          AppendUniqueDir(AContext.UnitPaths, DepDir);
-          AppendUniqueDir(AContext.IncludePaths, DepDir);
-        end;
+      // Resolve direct & transitive local/cached packages non-blockingly (never stall LSP on network I/O)
+      PkgOpts := Default(TPackageResolveOptions);
+      PkgOpts.Offline := True;
+      PkgOpts.AllowLockWrite := False;
+      PkgOpts.SoftMissingForLsp := True;
+      PkgOpts.IncludeTestDeps := ForTestFlag;
+      try
+        PkgRes := ResolveProjectPackages(
+          Parsed, ResolvedCfg,
+          AContext.Sdk.Manifest.TargetCpu, AContext.Sdk.Manifest.TargetOs,
+          PkgOpts
+        );
+        for I := 0 to High(PkgRes.UnitPaths) do
+          AppendUniqueDir(AContext.UnitPaths, PkgRes.UnitPaths[I]);
+        for I := 0 to High(PkgRes.IncludePaths) do
+          AppendUniqueDir(AContext.IncludePaths, PkgRes.IncludePaths[I]);
+        for I := 0 to High(PkgRes.ManifestFiles) do
+          AppendArg(AContext.ManifestFiles, PkgRes.ManifestFiles[I]);
+
+        if Length(PkgRes.MissingPackages) > 0 then
+          AWarningMsg := Format(
+            'Uncached dependencies (%s) — run ''nik pkg fetch'' or ''nik build'' to populate ~/.nikrun/cache/pkg.',
+            [PkgRes.MissingPackages[0]]);
+      except
+        on E: Exception do
+          AWarningMsg := E.Message;
       end;
 
       LoadedFromManifest := True;

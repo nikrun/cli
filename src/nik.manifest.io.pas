@@ -17,7 +17,7 @@ function ParseTemplateText(const AText, ATemplatePath: string): TParsedTemplate;
 implementation
 
 uses
-  nik.types, nik.paths, nik.fs, nik.yaml, nik.sdk.manager;
+  nik.types, nik.paths, nik.fs, nik.yaml, nik.archive, nik.sdk.manager, nik.pkg.types, nik.pkg.semver;
 
 type
   TOverlayScope = (osRoot, osTest, osTarget, osProfile, osTemplateRoot, osTemplateSub);
@@ -471,19 +471,110 @@ begin
   end;
 end;
 
+function FindUrlPathAtSeparator(const ARawUrl: string): Integer;
+var
+  SchemeSep, RestSlash, PathStart, I: Integer;
+  Scheme, Rest: string;
+begin
+  Result := 0;
+  SchemeSep := Pos('://', ARawUrl);
+  if SchemeSep <= 1 then
+    Exit;
+  Scheme := LowerCase(Copy(ARawUrl, 1, SchemeSep - 1));
+  Rest := Copy(ARawUrl, SchemeSep + 3, MaxInt);
+  if Scheme = 'file' then
+    PathStart := SchemeSep + 3
+  else
+  begin
+    RestSlash := Pos('/', Rest);
+    if RestSlash <= 0 then
+      Exit;
+    PathStart := SchemeSep + 2 + RestSlash;
+  end;
+
+  for I := Length(ARawUrl) downto PathStart + 1 do
+    if ARawUrl[I] = '@' then
+      Exit(I);
+end;
+
+procedure ParseScalarDependencySpec(const AName, ARaw: string; ALine: Integer;
+  const AManifestPath: string; var ASpec: TDependencySpec);
+var
+  Raw, BaseUrl, SpecPart, ErrMsg: string;
+  AtPos: Integer;
+  DummyConstraint: TSemVerConstraint;
+begin
+  Raw := Trim(ARaw);
+  if HasExplicitLocalPathPrefix(Raw) then
+  begin
+    ASpec.Path := Raw;
+    if IsSupportedArchivePath(Raw) then
+      ASpec.Kind := dskLocalArchive
+    else
+      ASpec.Kind := dskLocalPath;
+    Exit;
+  end;
+
+  if HasExplicitUrlScheme(Raw) then
+  begin
+    AtPos := FindUrlPathAtSeparator(Raw);
+    if AtPos > 0 then
+    begin
+      BaseUrl := Copy(Raw, 1, AtPos - 1);
+      SpecPart := Trim(Copy(Raw, AtPos + 1, MaxInt));
+      if SpecPart = '' then
+        RaiseManifestError(AManifestPath, ALine,
+          Format('Dependency ''%s'' has an empty version/commit specifier after ''@''.', [AName]));
+
+      if not NormalizeRemoteUrlBase(BaseUrl, True, ASpec.Url, ErrMsg) then
+        RaiseManifestError(AManifestPath, ALine, ErrMsg);
+
+      if IsHexCommitSpecifier(SpecPart) then
+        ASpec.Rev := NormalizeHexCommit(SpecPart)
+      else if TryParseSemVerConstraint(SpecPart, DummyConstraint, ErrMsg) then
+        ASpec.VersionSpec := SpecPart
+      else
+        RaiseManifestError(AManifestPath, ALine, ErrMsg);
+
+      ASpec.Kind := dskGitRepo;
+      Exit;
+    end;
+
+    if IsSupportedArchivePath(Raw) then
+    begin
+      if not NormalizeRemoteUrlBase(Raw, False, ASpec.Url, ErrMsg) then
+        RaiseManifestError(AManifestPath, ALine, ErrMsg);
+      ASpec.Kind := dskArchiveUrl;
+      Exit;
+    end;
+
+    if not NormalizeRemoteUrlBase(Raw, True, ASpec.Url, ErrMsg) then
+      RaiseManifestError(AManifestPath, ALine, ErrMsg);
+
+    RaiseManifestError(AManifestPath, ALine,
+      Format('Git dependency ''%s'' URL ''%s'' must include ''@<version>'' or ''@<commit>'' (e.g. %s@^0.1.0), or end in .zip/.tar.gz/.tgz.',
+        [AName, Raw, ASpec.Url]));
+  end;
+
+  RaiseManifestError(AManifestPath, ALine,
+    Format('Ambiguous dependency ''%s'' value ''%s'': prefix remote URLs with ''https://'' (e.g. https://github.com/owner/repo@^0.1.0) or local paths with ''./'' or ''../''.',
+      [AName, Raw]));
+end;
+
 procedure ParseDependenciesSection(ANode: TYamlNode; const AContext, AManifestPath: string;
   out ADeps: TDependencySpecArray);
 const
   ALLOWED_DEP_KEYS: array[0..7] of string = (
-    'path', 'version', 'git', 'tag', 'branch', 'rev', 'unitPaths', 'includePaths'
+    'path', 'url', 'version', 'rev', 'subpath', 'sha256', 'unitPaths', 'includePaths'
   );
 var
   I: Integer;
   Entry: TYamlKeyValue;
   ValNode: TYamlNode;
   Spec: TDependencySpec;
-  DepCtx: string;
+  DepCtx, RawPath, RawUrl, RawVer, RawRev, RawSubpath, RawSha256, ErrMsg: string;
   DummyHas: Boolean;
+  DummyConstraint: TSemVerConstraint;
 begin
   ADeps := nil;
   if ANode.Kind = ynkNull then
@@ -504,28 +595,137 @@ begin
     DummyHas := False;
 
     if ValNode.Kind = ynkScalar then
-      Spec.Version := ExpectScalarString(ValNode, DepCtx, AManifestPath)
+    begin
+      ParseScalarDependencySpec(
+        Entry.Key,
+        ExpectScalarString(ValNode, DepCtx, AManifestPath),
+        ValNode.Line,
+        AManifestPath,
+        Spec
+      );
+    end
     else if ValNode.Kind = ynkMapping then
     begin
       ValidateAllowedKeys(ValNode, ALLOWED_DEP_KEYS, DepCtx, AManifestPath);
-      ReadOptStr(ValNode, 'path', DepCtx, AManifestPath, False, DummyHas, Spec.Path);
-      ReadOptStr(ValNode, 'version', DepCtx, AManifestPath, False, DummyHas, Spec.Version);
-      ReadOptStr(ValNode, 'git', DepCtx, AManifestPath, False, DummyHas, Spec.GitUrl);
-      ReadOptStr(ValNode, 'tag', DepCtx, AManifestPath, False, DummyHas, Spec.GitRef);
-      if Spec.GitRef = '' then
-        ReadOptStr(ValNode, 'branch', DepCtx, AManifestPath, False, DummyHas, Spec.GitRef);
-      if Spec.GitRef = '' then
-        ReadOptStr(ValNode, 'rev', DepCtx, AManifestPath, False, DummyHas, Spec.GitRef);
+      RawPath := '';
+      RawUrl := '';
+      RawVer := '';
+      RawRev := '';
+      RawSubpath := '';
+      RawSha256 := '';
+
+      ReadOptStr(ValNode, 'path', DepCtx, AManifestPath, False, DummyHas, RawPath);
+      ReadOptStr(ValNode, 'url', DepCtx, AManifestPath, False, DummyHas, RawUrl);
+      ReadOptStr(ValNode, 'version', DepCtx, AManifestPath, False, DummyHas, RawVer);
+      ReadOptStr(ValNode, 'rev', DepCtx, AManifestPath, False, DummyHas, RawRev);
+      ReadOptStr(ValNode, 'subpath', DepCtx, AManifestPath, False, DummyHas, RawSubpath);
+      ReadOptStr(ValNode, 'sha256', DepCtx, AManifestPath, False, DummyHas, RawSha256);
       ReadOptStrList(ValNode, 'unitPaths', DepCtx, AManifestPath, DummyHas, Spec.UnitPaths);
       ReadOptStrList(ValNode, 'includePaths', DepCtx, AManifestPath, DummyHas, Spec.IncludePaths);
 
-      if (Spec.Path = '') and (Spec.Version = '') and (Spec.GitUrl = '') then
+      if RawSubpath <> '' then
+      begin
+        if not ValidateCleanSubpath(RawSubpath, Spec.Subpath, ErrMsg) then
+          RaiseManifestError(AManifestPath, ValNode.Find('subpath').Line, ErrMsg);
+      end;
+
+      if RawSha256 <> '' then
+      begin
+        if not ValidateHexSha256(RawSha256, Spec.Sha256) then
+          RaiseManifestError(AManifestPath, ValNode.Find('sha256').Line,
+            Format('Invalid SHA-256 hex digest ''%s'' in ''%s.sha256'' (expected 64 hex characters).', [RawSha256, DepCtx]));
+      end;
+
+      if (RawVer <> '') and (RawRev <> '') then
         RaiseManifestError(AManifestPath, Entry.KeyLine,
-          Format('Dependency ''%s'' must specify ''path'', ''version'', or ''git''.', [Entry.Key]));
+          Format('Dependency ''%s'' cannot specify both ''version'' and ''rev''.', [Entry.Key]));
+
+      if RawVer <> '' then
+      begin
+        if not TryParseSemVerConstraint(RawVer, DummyConstraint, ErrMsg) then
+          RaiseManifestError(AManifestPath, ValNode.Find('version').Line, ErrMsg);
+        Spec.VersionSpec := Trim(RawVer);
+      end;
+
+      if RawRev <> '' then
+      begin
+        if not IsHexCommitSpecifier(RawRev) then
+          RaiseManifestError(AManifestPath, ValNode.Find('rev').Line,
+            Format('Invalid commit hash ''%s'' in ''%s.rev''. Moving branch names are disallowed; use a 7..40 char hex commit hash.',
+              [RawRev, DepCtx]));
+        Spec.Rev := NormalizeHexCommit(RawRev);
+      end;
+
+      if (RawPath = '') and (RawUrl = '') then
+        RaiseManifestError(AManifestPath, Entry.KeyLine,
+          Format('Dependency ''%s'' must specify ''path'' or ''url''.', [Entry.Key]));
+
+      if RawPath <> '' then
+      begin
+        if HasExplicitUrlScheme(RawPath) then
+          RaiseManifestError(AManifestPath, ValNode.Find('path').Line,
+            Format('''%s.path'' must be a local filesystem path, not a URL (use ''url'' for remote sources).', [DepCtx]));
+        Spec.Path := Trim(RawPath);
+      end;
+
+      if RawUrl <> '' then
+      begin
+        if FindUrlPathAtSeparator(RawUrl) > 0 then
+          RaiseManifestError(AManifestPath, ValNode.Find('url').Line,
+            Format('In mapping form, specify ''version'' or ''rev'' as separate keys instead of ''@...'' inside ''%s.url''.', [DepCtx]));
+      end;
+
+      if (RawPath <> '') and (RawUrl = '') then
+      begin
+        if (Spec.VersionSpec <> '') or (Spec.Rev <> '') then
+          RaiseManifestError(AManifestPath, Entry.KeyLine,
+            Format('Local dependency ''%s'' cannot specify ''version'' or ''rev'' without ''url''.', [Entry.Key]));
+
+        if IsSupportedArchivePath(Spec.Path) then
+          Spec.Kind := dskLocalArchive
+        else
+        begin
+          if Spec.Sha256 <> '' then
+            RaiseManifestError(AManifestPath, ValNode.Find('sha256').Line,
+              Format('''%s.sha256'' is only valid on archive dependencies (.zip, .tar.gz, .tgz).', [DepCtx]));
+          Spec.Kind := dskLocalPath;
+        end;
+      end
+      else if (RawUrl <> '') and (RawPath = '') then
+      begin
+        if IsSupportedArchivePath(RawUrl) and (Spec.VersionSpec = '') and (Spec.Rev = '') then
+        begin
+          if not NormalizeRemoteUrlBase(RawUrl, False, Spec.Url, ErrMsg) then
+            RaiseManifestError(AManifestPath, ValNode.Find('url').Line, ErrMsg);
+          Spec.Kind := dskArchiveUrl;
+        end
+        else
+        begin
+          if not NormalizeRemoteUrlBase(RawUrl, True, Spec.Url, ErrMsg) then
+            RaiseManifestError(AManifestPath, ValNode.Find('url').Line, ErrMsg);
+          if (Spec.VersionSpec = '') and (Spec.Rev = '') then
+            RaiseManifestError(AManifestPath, Entry.KeyLine,
+              Format('Git dependency ''%s'' with ''url'' must specify ''version'' or ''rev''.', [Entry.Key]));
+          if Spec.Sha256 <> '' then
+            RaiseManifestError(AManifestPath, ValNode.Find('sha256').Line,
+              Format('''%s.sha256'' is only supported on direct archive dependencies (Git dependencies verify tree integrity via nik.lock).', [DepCtx]));
+          Spec.Kind := dskGitRepo;
+        end;
+      end
+      else
+      begin
+        // Both 'url' and 'path' specified: local checkout/archive overriding a remote URL across the dependency tree
+        if not NormalizeRemoteUrlBase(RawUrl, not IsSupportedArchivePath(RawUrl), Spec.Url, ErrMsg) then
+          RaiseManifestError(AManifestPath, ValNode.Find('url').Line, ErrMsg);
+        if IsSupportedArchivePath(Spec.Path) then
+          Spec.Kind := dskLocalArchive
+        else
+          Spec.Kind := dskLocalPath;
+      end;
     end
     else
       RaiseManifestError(AManifestPath, Entry.KeyLine,
-        Format('Dependency ''%s'' must be a version string or mapping.', [Entry.Key]));
+        Format('Dependency ''%s'' must be a compact path/URL string or a mapping.', [Entry.Key]));
 
     ADeps[I] := Spec;
   end;

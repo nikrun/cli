@@ -643,8 +643,12 @@ begin
   end;
 
   if FWorkspaceReady then
+  begin
+    if WarnMsg <> '' then
+      SendLogMessage(lmtWarning, WarnMsg);
     SendLogMessage(lmtInfo, Format('nik lsp ready (SDK: %s, profile: %s, root: %s)',
-      [FWorkspace.Sdk.Manifest.SdkId, FWorkspace.ProfileName, FWorkspace.ProjectDir]))
+      [FWorkspace.Sdk.Manifest.SdkId, FWorkspace.ProfileName, FWorkspace.ProjectDir]));
+  end
   else
     SendLogMessage(lmtWarning, 'nik lsp workspace fallback (no SDK/manifest resolved): ' + WarnMsg);
 end;
@@ -752,7 +756,7 @@ procedure TNikPascalLspServer.DoDidSave(ADoc: TLspDocument;
 begin
   if ADoc = nil then
     Exit;
-  if IsManifestFilePath(ADoc.FilePath) then
+  if IsManifestFilePath(ADoc.FilePath) or SameText(ExtractFileName(ADoc.FilePath), 'nik.lock') then
   begin
     ReloadWorkspaceConfiguration;
     EnqueueAllOpenPascalDocuments;
@@ -842,7 +846,7 @@ begin
     if LocalPath = '' then
       Continue;
 
-    if IsManifestFilePath(LocalPath) then
+    if IsManifestFilePath(LocalPath) or SameText(ExtractFileName(LocalPath), 'nik.lock') then
       ManifestTouched := True
     else if IsPascalDocFilePath(LocalPath) then
     begin

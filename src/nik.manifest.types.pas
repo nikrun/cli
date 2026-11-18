@@ -11,13 +11,17 @@ type
   TManifestKind = (mkProgram, mkLibrary, mkPackage);
   TPicMode = (pmAuto, pmOn, pmOff);
   TAppSubsystem = (asConsole, asGui);
+  TDependencySourceKind = (dskLocalPath, dskLocalArchive, dskGitRepo, dskArchiveUrl);
 
   TDependencySpec = record
     Name: string;
+    Kind: TDependencySourceKind;
     Path: string;
-    Version: string;
-    GitUrl: string;
-    GitRef: string;
+    Url: string;
+    VersionSpec: string;
+    Rev: string;
+    Subpath: string;
+    Sha256: string;
     UnitPaths: TStringArray;
     IncludePaths: TStringArray;
     DefinedLine: Integer;

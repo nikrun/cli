@@ -26,6 +26,8 @@ begin
   WriteLn('  -p, --profile <NAME>   Build with the named profile from nik.yaml (default: debug)');
   WriteLn('  -m, --manifest <PATH>  Path to nik.yaml or project directory');
   WriteLn('      --clean            Clean profile build cache (.nik/cache) and force rebuild (-B)');
+  WriteLn('      --locked           Require nik.lock to be up to date without modifying it');
+  WriteLn('      --offline          Resolve dependencies strictly from ~/.nikrun/cache/pkg without network');
   WriteLn('  -v, --verbose          Show full compiler invocation and note/hint diagnostics');
   WriteLn('      --json             Output structured JSON build report and diagnostics');
   WriteLn('  -h, --help             Show this help message');
@@ -266,6 +268,10 @@ begin
       TargetOpts.ManifestOverride := Val
     else if Arg = '--clean' then
       FlagClean := True
+    else if Arg = '--locked' then
+      TargetOpts.Locked := True
+    else if Arg = '--offline' then
+      TargetOpts.Offline := True
     else if (Arg = '-v') or (Arg = '--verbose') then
       FlagVerbose := True
     else if Arg = '--json' then

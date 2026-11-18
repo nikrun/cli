@@ -14,7 +14,8 @@ procedure ResolveEffectiveToolchain(const AManifest: TParsedManifest;
 function ResolveManifestConfig(const AManifest: TParsedManifest;
   const AProfileName, ATargetCpu, ATargetOs: string;
   AForTest: Boolean = False;
-  ARequireEntry: Boolean = True): TResolvedManifest;
+  ARequireEntry: Boolean = True;
+  ARequireToolchain: Boolean = True): TResolvedManifest;
 
 function ResolveManifestProfile(const AManifest: TParsedManifest;
   const AProfileName: string;
@@ -308,7 +309,7 @@ end;
 
 function ResolveManifestConfig(const AManifest: TParsedManifest;
   const AProfileName, ATargetCpu, ATargetOs: string;
-  AForTest, ARequireEntry: Boolean): TResolvedManifest;
+  AForTest, ARequireEntry, ARequireToolchain: Boolean): TResolvedManifest;
 var
   ProfileIdx: Integer;
   EffProfile: string;
@@ -429,7 +430,7 @@ begin
     end;
   end;
 
-  if Trim(Result.FpcSpec) = '' then
+  if ARequireToolchain and (Result.Kind <> mkPackage) and (Trim(Result.FpcSpec) = '') then
     RaiseManifestError(AManifest.ManifestPath, AManifest.RootLine,
       Format('Missing required ''%s.toolchain.fpc'' (e.g. ''3.2.2'' or ''3.3.1'').',
         [ManifestKindToString(Result.Kind)]));

@@ -22,7 +22,8 @@ uses
   nik.sdk.manager,
   nik.manifest.types,
   nik.manifest.io,
-  nik.manifest.resolve;
+  nik.manifest.resolve,
+  nik.pkg.types;
 
 procedure PrintInitHelp;
 begin
@@ -336,7 +337,8 @@ procedure EmitDependenciesSectionLines(ALines: TStringList; const AIndent: strin
   const ADeps: TDependencySpecArray);
 var
   I: Integer;
-  DepIndent, SubIndent: string;
+  DepIndent, SubIndent, CompactVal: string;
+  HasExtraFields: Boolean;
 begin
   if Length(ADeps) = 0 then
     Exit;
@@ -346,20 +348,48 @@ begin
   SubIndent := DepIndent + '  ';
   for I := 0 to High(ADeps) do
   begin
-    if (ADeps[I].Path = '') and (ADeps[I].GitUrl = '') and
-       (Length(ADeps[I].UnitPaths) = 0) and (Length(ADeps[I].IncludePaths) = 0) then
-      ALines.Add(DepIndent + FormatYamlScalar(ADeps[I].Name) + ': ' + FormatYamlScalar(ADeps[I].Version, True))
+    HasExtraFields := (ADeps[I].Subpath <> '') or
+                      (ADeps[I].Sha256 <> '') or
+                      (Length(ADeps[I].UnitPaths) > 0) or
+                      (Length(ADeps[I].IncludePaths) > 0) or
+                      ((ADeps[I].Path <> '') and (ADeps[I].Url <> ''));
+
+    CompactVal := '';
+    if not HasExtraFields then
+    begin
+      case ADeps[I].Kind of
+        dskLocalPath, dskLocalArchive:
+          if HasExplicitLocalPathPrefix(ADeps[I].Path) then
+            CompactVal := ADeps[I].Path;
+        dskArchiveUrl:
+          CompactVal := ADeps[I].Url;
+        dskGitRepo:
+          if ADeps[I].Rev <> '' then
+            CompactVal := ADeps[I].Url + '@' + ADeps[I].Rev
+          else
+            CompactVal := ADeps[I].Url + '@' + ADeps[I].VersionSpec;
+      else
+        CompactVal := '';
+      end;
+    end;
+
+    if CompactVal <> '' then
+      ALines.Add(DepIndent + FormatYamlScalar(ADeps[I].Name) + ': ' + FormatYamlScalar(CompactVal))
     else
     begin
       ALines.Add(DepIndent + FormatYamlScalar(ADeps[I].Name) + ':');
+      if ADeps[I].Url <> '' then
+        ALines.Add(SubIndent + 'url: ' + FormatYamlScalar(ADeps[I].Url));
       if ADeps[I].Path <> '' then
         ALines.Add(SubIndent + 'path: ' + FormatYamlScalar(ADeps[I].Path));
-      if ADeps[I].Version <> '' then
-        ALines.Add(SubIndent + 'version: ' + FormatYamlScalar(ADeps[I].Version, True));
-      if ADeps[I].GitUrl <> '' then
-        ALines.Add(SubIndent + 'git: ' + FormatYamlScalar(ADeps[I].GitUrl, True));
-      if ADeps[I].GitRef <> '' then
-        ALines.Add(SubIndent + 'rev: ' + FormatYamlScalar(ADeps[I].GitRef, True));
+      if ADeps[I].VersionSpec <> '' then
+        ALines.Add(SubIndent + 'version: ' + FormatYamlScalar(ADeps[I].VersionSpec, True));
+      if ADeps[I].Rev <> '' then
+        ALines.Add(SubIndent + 'rev: ' + FormatYamlScalar(ADeps[I].Rev));
+      if ADeps[I].Subpath <> '' then
+        ALines.Add(SubIndent + 'subpath: ' + FormatYamlScalar(ADeps[I].Subpath));
+      if ADeps[I].Sha256 <> '' then
+        ALines.Add(SubIndent + 'sha256: ' + FormatYamlScalar(ADeps[I].Sha256));
       if Length(ADeps[I].UnitPaths) > 0 then
         ALines.Add(SubIndent + 'unitPaths: ' + FormatYamlInlineList(ADeps[I].UnitPaths));
       if Length(ADeps[I].IncludePaths) > 0 then

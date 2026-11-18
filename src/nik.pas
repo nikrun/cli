@@ -10,6 +10,7 @@ uses
   nik.paths,
   nik.cmd.init,
   nik.cmd.sdk,
+  nik.cmd.pkg,
   nik.cmd.build,
   nik.cmd.lsp;
 
@@ -29,6 +30,7 @@ begin
   WriteLn(StyleBold('COMMANDS:'));
   WriteLn('  ' + PadRightStr('init', 14) + 'Initialize a new Free Pascal project (nik.yaml)');
   WriteLn('  ' + PadRightStr('build', 14) + 'Compile a Free Pascal project using nik.yaml');
+  WriteLn('  ' + PadRightStr('pkg', 14) + 'Fetch, update, list, and inspect nik.yaml dependencies');
   WriteLn('  ' + PadRightStr('lsp', 14) + 'Start the Free Pascal Language Server (LSP 3.17)');
   WriteLn('  ' + PadRightStr('sdk', 14) + 'Discover, install, inspect, and remove Free Pascal SDKs');
   WriteLn('  ' + PadRightStr('version', 14) + 'Print CLI version and target information');
@@ -113,6 +115,8 @@ begin
       PrintInitHelp
     else if (Length(FilteredArgs) >= 2) and SameText(FilteredArgs[1], 'sdk') then
       PrintSdkHelp
+    else if (Length(FilteredArgs) >= 2) and SameText(FilteredArgs[1], 'pkg') then
+      PrintPkgHelp
     else if (Length(FilteredArgs) >= 2) and SameText(FilteredArgs[1], 'build') then
       PrintBuildHelp
     else if (Length(FilteredArgs) >= 2) and SameText(FilteredArgs[1], 'lsp') then
@@ -134,6 +138,8 @@ begin
     Result := ExecuteInitCommand(CmdArgs)
   else if CmdName = 'sdk' then
     Result := ExecuteSdkCommand(CmdArgs)
+  else if CmdName = 'pkg' then
+    Result := ExecutePkgCommand(CmdArgs)
   else if CmdName = 'build' then
     Result := ExecuteBuildCommand(CmdArgs)
   else if CmdName = 'lsp' then

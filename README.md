@@ -12,7 +12,7 @@ This repository contains the standalone **`nik` CLI** (`src/nik.*.pas`) and the 
 
 ### Nikrun Ecosystem Repositories
 
-- **[`nikrun/cli`](https://github.com/nikrun/cli)** *(this repository)* — Standalone `nik` CLI (`nik sdk`, `nik init`, `nik build`, `nik lsp`) and `nikrun-lsp-protocol`
+- **[`nikrun/cli`](https://github.com/nikrun/cli)** *(this repository)* — Standalone `nik` CLI (`nik sdk`, `nik init`, `nik build`, `nik pkg`, `nik lsp`) and `nikrun-lsp-protocol`
 - **[`nikrun/sdk`](https://github.com/nikrun/sdk)** — Automated build pipeline and GitHub Releases (`latest`) for portable Free Pascal SDK archives (`3.2.2`, `3.2.4`, `3.2.5`, `3.3.1`)
 - **[`nikrun/vscode`](https://github.com/nikrun/vscode)** — Official `vscode-nikrun` Visual Studio Code extension for Object Pascal / Free Pascal
 
@@ -92,9 +92,16 @@ nik sdk uninstall 3.3.1          # Remove an installed SDK
 nik init my-app                  # Scaffold a program project (applies ~/.nikrun/template.yaml if present)
 nik init my-lib --lib            # Scaffold a shared library (.dll / .so / .dylib)
 nik init my-units --pkg          # Scaffold a source-first Object Pascal package
-nik build                        # Compile using the exact toolchain.fpc and flags in nik.yaml
+nik build                        # Compile using nik.yaml (automatically fetches & locks dependencies)
 nik build -p release             # Optimized release build (--profile release)
+nik build --locked               # CI build requiring nik.lock to be up to date
 nik build --clean --json         # Clean checkout cache and emit structured JSON diagnostics
+
+# Inspect, fetch & update decentralized URL/path dependencies (declared in nik.yaml)
+nik pkg info https://github.com/nikrun/cli  # Inspect SemVer tags & HEAD commit of any Git URL
+nik pkg fetch                    # Pre-fetch all nik.yaml dependencies into ~/.nikrun/cache/pkg/ & sync nik.lock
+nik pkg update                   # Upgrade locked SemVer versions in nik.lock within nik.yaml constraints
+nik pkg list --json              # Inspect resolved direct & transitive dependency graph
 ```
 
 ### Declarative Project Manifest (`nik.yaml`)
@@ -160,10 +167,16 @@ cli/
 │   ├── nik.fs.pas               # Filesystem directory operations & UTF-8 file I/O
 │   ├── nik.sha256.pas           # Pure Object Pascal streaming SHA-256 (RFC 6234)
 │   ├── nik.http.pas             # HTTPS/HTTP & file:// client (WinInet on Windows, curl/wget on Unix)
-│   ├── nik.archive.pas          # ZIP extraction & Unix executable permission handling
+│   ├── nik.archive.pas          # .zip / .tar.gz / .tgz extraction & single-root unwrapping
 │   ├── nik.sdk.config.pas       # sdk-manifest.json, index.json & isolated fpc.cfg generator
 │   ├── nik.sdk.manager.pas      # SDK discovery, version resolution, download, verification & lifecycle
 │   ├── nik.cmd.sdk.pas          # `nik sdk` subcommand CLI parser & formatters
+│   ├── nik.pkg.types.pas        # Canonical package IDs, URL/path disambiguation & lockfile records
+│   ├── nik.pkg.semver.pas       # SemVer 2.0 parser, constraint evaluator & MVS selector
+│   ├── nik.pkg.lock.pas         # Deterministic nik.lock YAML I/O & directory-tree SHA-256 hashing
+│   ├── nik.pkg.fetch.pas        # Git Smart HTTP / git CLI discovery & immutable ~/.nikrun/cache/pkg/ fetcher
+│   ├── nik.pkg.resolve.pas      # Transitive MVS package graph resolver & local URL override engine
+│   ├── nik.cmd.pkg.pas          # `nik pkg` subcommand CLI parser (`fetch`, `update`, `list`, `info`)
 │   ├── nik.cmd.init.pas         # `nik init` project scaffolder & ~/.nikrun/template.yaml loader
 │   ├── nik.yaml.pas             # Pure Object Pascal YAML subset parser with line tracking
 │   ├── nik.manifest.types.pas   # nik.yaml domain records, overlay records & TResolvedManifest

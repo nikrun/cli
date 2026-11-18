@@ -652,7 +652,7 @@ package:
   test:
     entry: tests/pkg_test.pas
     dependencies:
-      mock-assert: "^0.1.0"
+      mock-assert: https://github.com/example/mock-assert@^0.1.0
 "@ | Set-Content -Path (Join-Path $DepDir 'nik.yaml') -Encoding UTF8
 
             @"
@@ -757,7 +757,7 @@ program:
       defines: [TESTING]
       heaptrc: true
     dependencies:
-      test-only-helper: "^1.0.0"
+      test-only-helper: https://github.com/example/test-only-helper@^1.0.0
 
   targets:
     windows:
@@ -1438,6 +1438,510 @@ end.
         Assert-True ($sess6.Exited -and $sess6.ExitCode -eq 0) 'Cache-invalidation nik lsp session exits cleanly with code 0'
         $ctAppDiagFrame = @($sess6.Frames | Where-Object { $_.PSObject.Properties['method'] -and $_.method -eq 'textDocument/publishDiagnostics' -and $_.params.uri -eq $ctAppUri })[0]
         Assert-True ($null -ne $ctAppDiagFrame -and @($ctAppDiagFrame.params.diagnostics).Count -ge 1 -and $ctAppDiagFrame.params.diagnostics[0].message -match 'ActiveFeatureValue') 'nik lsp purges stale cached .ppu files when nik.yaml defines change so dependent main program reports missing identifier immediately'
+    }
+
+    # -------------------------------------------------------------------------
+    # Decentralized URL & Path Package Management (nik pkg, nik.lock, MVS, Archives & LSP)
+    # -------------------------------------------------------------------------
+    Write-Host "`n==> Testing decentralized URL & path package manager (nik pkg, nik.lock, MVS, archives & overrides)..." -ForegroundColor Cyan
+
+    $PkgTestHome = Join-Path $WorkDir 'pkg-nik-home'
+    New-Item -ItemType Directory -Force -Path $PkgTestHome | Out-Null
+
+    # 1. Pure-Pascal Git Smart HTTP pkt-line parser test via local HTTP server (zero git invocation)
+    function Format-GitPktLine([string]$Payload) {
+        $bytes = [System.Text.Encoding]::ASCII.GetBytes($Payload)
+        $total = $bytes.Length + 4
+        $hex = $total.ToString('x4')
+        return ($hex + $Payload)
+    }
+
+    $SmartGitDir = Join-Path $ServerDir 'smart-demo.git\info'
+    New-Item -ItemType Directory -Force -Path $SmartGitDir | Out-Null
+    $shaHead = '1111111111111111111111111111111111111111'
+    $shaTagObj = '2222222222222222222222222222222222222222'
+    $shaV100 = '3333333333333333333333333333333333333333'
+    $shaV120 = '4444444444444444444444444444444444444444'
+    $pktBody = (Format-GitPktLine "# service=git-upload-pack`n") +
+               '0000' +
+               (Format-GitPktLine "$shaHead HEAD`0multi_ack symref=HEAD:refs/heads/main agent=git/2.45`n") +
+               (Format-GitPktLine "$shaHead refs/heads/main`n") +
+               (Format-GitPktLine "$shaTagObj refs/tags/v1.0.0`n") +
+               (Format-GitPktLine "$shaV100 refs/tags/v1.0.0^{}`n") +
+               (Format-GitPktLine "$shaV120 refs/tags/v1.2.0`n") +
+               '0000'
+    [System.IO.File]::WriteAllBytes((Join-Path $SmartGitDir 'refs'), [System.Text.Encoding]::ASCII.GetBytes($pktBody))
+
+    $smartInfoJson = (Invoke-Nik -NikHome $PkgTestHome -Arguments @('pkg', 'info', "http://127.0.0.1:$Port/smart-demo", '--json')).Output | ConvertFrom-Json
+    Assert-True ($smartInfoJson.success -eq $true -and $smartInfoJson.defaultBranch -eq 'main' -and $smartInfoJson.headCommit -eq $shaHead) 'nik pkg info parses Git Smart HTTP pkt-line symref and HEAD without git CLI'
+    Assert-True ($smartInfoJson.latestVersion -eq '1.2.0' -and @($smartInfoJson.tags).Count -eq 2) 'nik pkg info extracts sorted SemVer tags from Smart HTTP'
+    $v100Entry = @($smartInfoJson.tags | Where-Object { $_.version -eq '1.0.0' })[0]
+    Assert-True ($v100Entry.rev -eq $shaV100) 'nik pkg info peels annotated tag ^{} to underlying commit SHA'
+
+    # 2. Manifest prefix & validation error checks (ambiguous bare strings, relative file://, moving @main branch)
+    $BadDepDir = Join-Path $WorkDir 'bad-dep-manifests'
+    New-Item -ItemType Directory -Force -Path $BadDepDir | Out-Null
+
+    @"
+package:
+  name: bad-ambiguous
+  toolchain:
+    fpc: 3.2.2
+  dependencies:
+    ambiguous-pkg: github.com/owner/repo@^1.0.0
+"@ | Set-Content -Path (Join-Path $BadDepDir 'ambiguous.yaml') -Encoding UTF8
+    $ambigRes = Invoke-Nik -NikHome $PkgTestHome -Arguments @('pkg', 'fetch', '-m', (Join-Path $BadDepDir 'ambiguous.yaml')) -AllowFailure
+    Assert-True ($ambigRes.ExitCode -ne 0 -and $ambigRes.Output -match 'Ambiguous dependency') 'Manifest parser rejects unprefixed dependency value without https:// or ./ / ../'
+
+    @"
+package:
+  name: bad-branch
+  toolchain:
+    fpc: 3.2.2
+  dependencies:
+    moving-branch: https://github.com/owner/repo@main
+"@ | Set-Content -Path (Join-Path $BadDepDir 'branch.yaml') -Encoding UTF8
+    $branchRes = Invoke-Nik -NikHome $PkgTestHome -Arguments @('pkg', 'fetch', '-m', (Join-Path $BadDepDir 'branch.yaml')) -AllowFailure
+    Assert-True ($branchRes.ExitCode -ne 0 -and $branchRes.Output -match 'Moving branch names are disallowed') 'Manifest parser rejects moving branch name (@main) in nik.yaml'
+
+    @"
+package:
+  name: bad-relfile
+  toolchain:
+    fpc: 3.2.2
+  dependencies:
+    rel-file: file://../some-lib
+"@ | Set-Content -Path (Join-Path $BadDepDir 'relfile.yaml') -Encoding UTF8
+    $relFileRes = Invoke-Nik -NikHome $PkgTestHome -Arguments @('pkg', 'fetch', '-m', (Join-Path $BadDepDir 'relfile.yaml')) -AllowFailure
+    Assert-True ($relFileRes.ExitCode -ne 0 -and $relFileRes.Output -match 'Relative file:// URLs') 'Manifest parser rejects malformed relative file://../ URLs'
+
+    # 3. Full Git + Local/Remote Archive + MVS + Lockfile + Build + LSP E2E Suite
+    $GitExeCheck = Get-Command git -ErrorAction SilentlyContinue
+    if ($CandidateLspHome -and $GitExeCheck) {
+        # Share installed FPC SDK directory into isolated $PkgTestHome without touching user ~/.nikrun/cache/pkg
+        $srcSdks = Join-Path $CandidateLspHome 'sdks'
+        $dstSdks = Join-Path $PkgTestHome 'sdks'
+        if ($IsWin) {
+            New-Item -ItemType Junction -Path $dstSdks -Target $srcSdks | Out-Null
+        } else {
+            New-Item -ItemType SymbolicLink -Path $dstSdks -Target $srcSdks | Out-Null
+        }
+
+        function Invoke-GitRepo([string]$Dir, [string[]]$GitArgs) {
+            $prev = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+            & git -C $Dir -c user.name="NikTest" -c user.email="test@nikrun.dev" -c commit.gpgsign=false -c tag.gpgSign=false @GitArgs 2>&1 | Out-Null
+            $ec = $LASTEXITCODE
+            $ErrorActionPreference = $prev
+            if ($ec -ne 0) {
+                throw "git $($GitArgs -join ' ') failed in $Dir with exit code $ec"
+            }
+        }
+
+        function ConvertTo-RepoFileUrl([string]$Dir) {
+            $norm = ([System.IO.Path]::GetFullPath($Dir)).Replace('\', '/')
+            if ($norm -match '^([A-Za-z]):(.*)$') {
+                return "file:///$($Matches[1].ToLowerInvariant()):$($Matches[2])"
+            }
+            return "file://$norm"
+        }
+
+        $ReposRoot = Join-Path $WorkDir 'git-fixtures'
+        New-Item -ItemType Directory -Force -Path $ReposRoot | Out-Null
+
+        # Fixture Repo A: shared-core with SemVer tags v1.1.0, v1.2.0, v1.2.1, v2.0.0 (tests MVS + nik pkg update + conflict)
+        $SharedRepo = Join-Path $ReposRoot 'shared-core'
+        New-Item -ItemType Directory -Force -Path (Join-Path $SharedRepo 'src') | Out-Null
+        Invoke-GitRepo $SharedRepo @('init', '-b', 'main')
+
+        foreach ($ver in @('1.1.0', '1.2.0', '1.2.1', '2.0.0')) {
+            @"
+package:
+  name: shared-core
+  version: $ver
+  toolchain:
+    fpc: $CandidateLspFpcVersion
+  build:
+    unitPaths: [src]
+"@ | Set-Content -Path (Join-Path $SharedRepo 'nik.yaml') -Encoding UTF8
+
+            @"
+unit SharedCoreUnit;
+{`$mode objfpc}{`$H+}
+interface
+/// Returns active shared-core version tag.
+function GetSharedVer: string;
+implementation
+function GetSharedVer: string;
+begin
+  Result := '$ver';
+end;
+end.
+"@ | Set-Content -Path (Join-Path $SharedRepo 'src\SharedCoreUnit.pas') -Encoding UTF8
+
+            Invoke-GitRepo $SharedRepo @('add', '.')
+            Invoke-GitRepo $SharedRepo @('commit', '-m', "Release $ver")
+            if ($ver -eq '1.2.0') {
+                # Annotated tag test
+                Invoke-GitRepo $SharedRepo @('tag', '-a', "v$ver", '-m', "Annotated v$ver")
+            } else {
+                Invoke-GitRepo $SharedRepo @('tag', "v$ver")
+            }
+        }
+        $SharedUrl = ConvertTo-RepoFileUrl $SharedRepo
+
+        # Fixture Repo B: mid-kit v1.0.0 (transitively requires shared-core@^1.2.0 + monorepo subpath 'sub-pkg')
+        $MonoRepo = Join-Path $ReposRoot 'mono-suite'
+        New-Item -ItemType Directory -Force -Path (Join-Path $MonoRepo 'packages\sub-pkg\src') | Out-Null
+        Invoke-GitRepo $MonoRepo @('init', '-b', 'main')
+        @"
+package:
+  name: sub-pkg
+  version: 0.3.0
+  build:
+    unitPaths: [src]
+"@ | Set-Content -Path (Join-Path $MonoRepo 'packages\sub-pkg\nik.yaml') -Encoding UTF8
+        @"
+unit MonoSubUnit;
+{`$mode objfpc}{`$H+}
+interface
+function GetMonoTag: string;
+implementation
+function GetMonoTag: string;
+begin
+  Result := 'MONO_SUB';
+end;
+end.
+"@ | Set-Content -Path (Join-Path $MonoRepo 'packages\sub-pkg\src\MonoSubUnit.pas') -Encoding UTF8
+        Invoke-GitRepo $MonoRepo @('add', '.')
+        Invoke-GitRepo $MonoRepo @('commit', '-m', 'Initial monorepo')
+        Invoke-GitRepo $MonoRepo @('tag', 'v0.3.0')
+        $MonoUrl = ConvertTo-RepoFileUrl $MonoRepo
+
+        $MidRepo = Join-Path $ReposRoot 'mid-kit'
+        New-Item -ItemType Directory -Force -Path (Join-Path $MidRepo 'src') | Out-Null
+        Invoke-GitRepo $MidRepo @('init', '-b', 'main')
+        @"
+package:
+  name: mid-kit
+  version: 1.0.0
+  toolchain:
+    fpc: $CandidateLspFpcVersion
+  build:
+    unitPaths: [src]
+  dependencies:
+    shared-core: $SharedUrl@^1.2.0
+    mono-sub:
+      url: $MonoUrl
+      version: ^0.3.0
+      subpath: packages/sub-pkg
+"@ | Set-Content -Path (Join-Path $MidRepo 'nik.yaml') -Encoding UTF8
+        @"
+unit MidKitUnit;
+{`$mode objfpc}{`$H+}
+interface
+uses SharedCoreUnit, MonoSubUnit;
+function GetMidSummary: string;
+implementation
+function GetMidSummary: string;
+begin
+  Result := 'MID(' + GetSharedVer + ',' + GetMonoTag + ')';
+end;
+end.
+"@ | Set-Content -Path (Join-Path $MidRepo 'src\MidKitUnit.pas') -Encoding UTF8
+        Invoke-GitRepo $MidRepo @('add', '.')
+        Invoke-GitRepo $MidRepo @('commit', '-m', 'Release 1.0.0')
+        Invoke-GitRepo $MidRepo @('tag', 'v1.0.0')
+        $MidUrl = ConvertTo-RepoFileUrl $MidRepo
+
+        # Fixture Repo C: tagless legacy Pascal repo without nik.yaml (pinned via short commit SHA + unitPaths: [Source])
+        $LegacyRepo = Join-Path $ReposRoot 'legacy-pas'
+        New-Item -ItemType Directory -Force -Path (Join-Path $LegacyRepo 'Source') | Out-Null
+        Invoke-GitRepo $LegacyRepo @('init', '-b', 'main')
+        @"
+unit LegacyUnit;
+{`$mode objfpc}{`$H+}
+interface
+function GetLegacyTag: string;
+implementation
+function GetLegacyTag: string;
+begin
+  Result := 'LEGACY_PIN';
+end;
+end.
+"@ | Set-Content -Path (Join-Path $LegacyRepo 'Source\LegacyUnit.pas') -Encoding UTF8
+        Invoke-GitRepo $LegacyRepo @('add', '.')
+        Invoke-GitRepo $LegacyRepo @('commit', '-m', 'Untagged commit')
+        $LegacyFullSha = (& git -C $LegacyRepo rev-parse HEAD).Trim().ToLowerInvariant()
+        $LegacyShortSha = $LegacyFullSha.Substring(0, 8)
+        $LegacyUrl = ConvertTo-RepoFileUrl $LegacyRepo
+
+        # Verify nik pkg info on tagless repo suggests commit pin
+        $legInfo = (Invoke-Nik -NikHome $PkgTestHome -Arguments @('pkg', 'info', $LegacyUrl, '--json')).Output | ConvertFrom-Json
+        Assert-True ($legInfo.latestVersion -eq $null -and $legInfo.headCommit -eq $LegacyFullSha -and $legInfo.suggestedYaml -match "@$LegacyShortSha$") 'nik pkg info on tagless repo reports HEAD commit and commit-pinned YAML snippet'
+
+        # Fixture D: Local .zip archive (./vendor/local-arch.zip) AND Remote HTTP .tar.gz archive (with outer wrapper folder!)
+        $LocalArchStage = Join-Path $WorkDir 'stage-local-arch\local-arch-1.0.0'
+        New-Item -ItemType Directory -Force -Path (Join-Path $LocalArchStage 'src') | Out-Null
+        @"
+package:
+  name: local-arch
+  version: 1.0.0
+  toolchain:
+    fpc: $CandidateLspFpcVersion
+  build:
+    unitPaths: [src]
+"@ | Set-Content -Path (Join-Path $LocalArchStage 'nik.yaml') -Encoding UTF8
+        @"
+unit LocalArchUnit;
+{`$mode objfpc}{`$H+}
+interface
+function GetLocalArchTag: string;
+implementation
+function GetLocalArchTag: string;
+begin
+  Result := 'LOCAL_ZIP';
+end;
+end.
+"@ | Set-Content -Path (Join-Path $LocalArchStage 'src\LocalArchUnit.pas') -Encoding UTF8
+
+        $RemoteArchStage = Join-Path $WorkDir 'stage-remote-arch\remote-arch-2.0.0'
+        New-Item -ItemType Directory -Force -Path (Join-Path $RemoteArchStage 'src') | Out-Null
+        @"
+package:
+  name: remote-arch
+  version: 2.0.0
+  toolchain:
+    fpc: $CandidateLspFpcVersion
+  build:
+    unitPaths: [src]
+"@ | Set-Content -Path (Join-Path $RemoteArchStage 'nik.yaml') -Encoding UTF8
+        @"
+unit RemoteArchUnit;
+{`$mode objfpc}{`$H+}
+interface
+function GetRemoteArchTag: string;
+implementation
+function GetRemoteArchTag: string;
+begin
+  Result := 'HTTP_TARGZ';
+end;
+end.
+"@ | Set-Content -Path (Join-Path $RemoteArchStage 'src\RemoteArchUnit.pas') -Encoding UTF8
+
+        $RemoteTarGzPath = Join-Path $ServerDir 'remote-arch-2.0.0.tar.gz'
+        $TarCmd = if ($IsWin -and (Test-Path 'C:\Windows\System32\tar.exe')) { 'C:\Windows\System32\tar.exe' } else { 'tar' }
+        & $TarCmd -czf $RemoteTarGzPath -C (Join-Path $WorkDir 'stage-remote-arch') 'remote-arch-2.0.0'
+        Assert-True (Test-Path $RemoteTarGzPath) 'Created .tar.gz package fixture with single wrapper root directory'
+
+        # Local workspace directory sibling (compact ../local-sibling without fake URL!)
+        $SiblingDir = Join-Path $WorkDir 'pkg-e2e\local-sibling'
+        New-Item -ItemType Directory -Force -Path (Join-Path $SiblingDir 'src') | Out-Null
+        @"
+package:
+  name: local-sibling
+  version: 0.1.0
+  toolchain:
+    fpc: $CandidateLspFpcVersion
+  build:
+    unitPaths: [src]
+"@ | Set-Content -Path (Join-Path $SiblingDir 'nik.yaml') -Encoding UTF8
+        @"
+unit LocalSiblingUnit;
+{`$mode objfpc}{`$H+}
+interface
+function GetSiblingTag: string;
+implementation
+function GetSiblingTag: string;
+begin
+  Result := 'SIBLING_DIR';
+end;
+end.
+"@ | Set-Content -Path (Join-Path $SiblingDir 'src\LocalSiblingUnit.pas') -Encoding UTF8
+
+        # Create main E2E consumer app combining ALL dependency types + Diamond MVS (^1.1.0 + transitive ^1.2.0)
+        $ConsumerDir = Join-Path $WorkDir 'pkg-e2e\consumer-app'
+        New-Item -ItemType Directory -Force -Path (Join-Path $ConsumerDir 'src'), (Join-Path $ConsumerDir 'vendor') | Out-Null
+        $LocalZipPath = Join-Path $ConsumerDir 'vendor\local-arch-1.0.0.zip'
+        if ($IsWin -and (Test-Path 'C:\Windows\System32\tar.exe')) {
+            & 'C:\Windows\System32\tar.exe' -a -cf $LocalZipPath -C (Join-Path $WorkDir 'stage-local-arch') 'local-arch-1.0.0'
+        } else {
+            Compress-Archive -Path $LocalArchStage -DestinationPath $LocalZipPath -Force
+        }
+
+        $ConsumerYamlPath = Join-Path $ConsumerDir 'nik.yaml'
+        $BaseConsumerYaml = @"
+program:
+  name: consumer-app
+  version: 0.1.0
+  entry: src/main.pas
+  toolchain:
+    fpc: $CandidateLspFpcVersion
+  build:
+    unitPaths: [src]
+  dependencies:
+    local-sibling: ../local-sibling
+    local-arch: ./vendor/local-arch-1.0.0.zip
+    remote-arch: http://127.0.0.1:$Port/remote-arch-2.0.0.tar.gz
+    shared-core: $SharedUrl@^1.1.0
+    mid-kit: $MidUrl@^1.0.0
+    legacy-pas:
+      url: $LegacyUrl
+      rev: $LegacyShortSha
+      unitPaths: [Source]
+"@
+        $BaseConsumerYaml | Set-Content -Path $ConsumerYamlPath -Encoding UTF8
+
+        $ConsumerMainPas = Join-Path $ConsumerDir 'src\main.pas'
+        @"
+program ConsumerMain;
+{`$mode objfpc}{`$H+}
+uses
+  LocalSiblingUnit, LocalArchUnit, RemoteArchUnit, SharedCoreUnit, MidKitUnit, LegacyUnit;
+begin
+  WriteLn(GetSiblingTag + '|' + GetLocalArchTag + '|' + GetRemoteArchTag + '|' + GetSharedVer + '|' + GetMidSummary + '|' + GetLegacyTag);
+end.
+"@ | Set-Content -Path $ConsumerMainPas -Encoding UTF8
+
+        # 3a. --locked before nik.lock exists must fail cleanly
+        $failLocked = Invoke-Nik -NikHome $PkgTestHome -Arguments @('build', '-m', $ConsumerDir, '--locked') -AllowFailure
+        Assert-True ($failLocked.ExitCode -ne 0 -and $failLocked.Output -match 'nik\.lock') 'nik build --locked fails cleanly before nik.lock is generated'
+
+        # 3b. Automatic hydration on 'nik build': MVS must pick shared-core 1.2.0 (minimum satisfying ^1.1.0 AND mid-kit ^1.2.0, NOT 1.2.1!)
+        $e2eBuild = (Invoke-Nik -NikHome $PkgTestHome -Arguments @('build', '-m', $ConsumerDir, '--json')).Output | ConvertFrom-Json
+        Assert-True ($e2eBuild.success -eq $true -and (Test-Path (Join-Path $ConsumerDir 'nik.lock'))) 'nik build automatically fetches all Git/archive dependencies and writes nik.lock'
+        $e2eRunOut = (& $e2eBuild.output.binaryPath).Trim()
+        Assert-True ($e2eRunOut -eq 'SIBLING_DIR|LOCAL_ZIP|HTTP_TARGZ|1.2.0|MID(1.2.0,MONO_SUB)|LEGACY_PIN') "Compiled binary links local dir, local .zip, HTTP .tar.gz, MVS diamond Git (1.2.0), monorepo subpath & short-SHA legacy repo ($e2eRunOut)"
+
+        # Verify immutable global package cache contains zero compiled .ppu/.o artifacts
+        $pkgCacheFiles = @(Get-ChildItem -Path (Join-Path $PkgTestHome 'cache\pkg') -Recurse -File | Where-Object { $_.Extension -in @('.ppu', '.o') })
+        Assert-True ($pkgCacheFiles.Count -eq 0) 'Global ~/.nikrun/cache/pkg stays strictly immutable with zero .ppu/.o artifacts'
+
+        # 3c. nik build --locked & --offline succeed once cached and locked
+        $lockedBuild = Invoke-Nik -NikHome $PkgTestHome -Arguments @('build', '-m', $ConsumerDir, '--locked', '--offline')
+        Assert-True ($lockedBuild.ExitCode -eq 0) 'nik build --locked --offline succeeds with zero network/git calls'
+
+        # 3d. nik pkg list --json inspects direct and transitive graph
+        $pkgList = (Invoke-Nik -NikHome $PkgTestHome -Arguments @('pkg', 'list', '-m', $ConsumerDir, '--offline', '--json')).Output | ConvertFrom-Json
+        $sharedResolved = @($pkgList.packages | Where-Object { $_.name -eq 'shared-core' })[0]
+        $monoResolved = @($pkgList.packages | Where-Object { $_.subpath -eq 'packages/sub-pkg' })[0]
+        Assert-True ($sharedResolved.version -eq '1.2.0' -and $sharedResolved.integrity -match '^sha256-[0-9a-f]{64}$') 'nik pkg list --json reports MVS version 1.2.0 and sha256 tree integrity'
+        Assert-True ($null -ne $monoResolved -and $monoResolved.direct -eq $false) 'nik pkg list --json includes transitive monorepo subpath dependency'
+
+        # 3e. nik lsp resolves Go-to-Definition and Hover into cached Git package in ~/.nikrun/cache/pkg/
+        $consumerRootUri = ConvertTo-FileUri $ConsumerDir
+        $consumerMainUri = ConvertTo-FileUri $ConsumerMainPas
+        $consumerMainText = [System.IO.File]::ReadAllText($ConsumerMainPas)
+        $consumerLines = $consumerMainText -split "`r?`n"
+        $callLineIdx = 0
+        for ($li = 0; $li -lt $consumerLines.Count; $li++) {
+            if ($consumerLines[$li] -match 'GetSharedVer') { $callLineIdx = $li; break }
+        }
+        $callColIdx = $consumerLines[$callLineIdx].IndexOf('GetSharedVer') + 3
+
+        $lspPkgSess = Invoke-LspSession -NikHomeDir $PkgTestHome -ProjectPath $ConsumerDir -LogPath '' -Messages @(
+            @{ jsonrpc = '2.0'; id = 60; method = 'initialize'; params = @{ processId = $PID; rootUri = $consumerRootUri } },
+            @{ jsonrpc = '2.0'; method = 'initialized'; params = @{} },
+            @{ jsonrpc = '2.0'; method = 'textDocument/didOpen'; params = @{ textDocument = @{ uri = $consumerMainUri; languageId = 'objectpascal'; version = 1; text = $consumerMainText } } },
+            @{ __waitDiagCount = @{ uri = $consumerMainUri; count = 1 } },
+            @{ jsonrpc = '2.0'; id = 61; method = 'textDocument/definition'; params = @{ textDocument = @{ uri = $consumerMainUri }; position = @{ line = $callLineIdx; character = $callColIdx } } },
+            @{ jsonrpc = '2.0'; id = 62; method = 'shutdown' },
+            @{ jsonrpc = '2.0'; method = 'exit' }
+        )
+        $lspPkgDef = @($lspPkgSess.Frames | Where-Object { $_.PSObject.Properties['id'] -and $_.id -eq 61 })[0]
+        Assert-True ($null -ne $lspPkgDef -and @($lspPkgDef.result).Count -ge 1 -and $lspPkgDef.result[0].uri -match 'SharedCoreUnit\.pas$') 'nik lsp resolves Go-to-Definition directly into cached package inside ~/.nikrun/cache/pkg'
+        $lspPkgDiags = @($lspPkgSess.Frames | Where-Object { $_.PSObject.Properties['method'] -and $_.method -eq 'textDocument/publishDiagnostics' -and $_.params.uri -eq $consumerMainUri })
+        Assert-True ($lspPkgDiags.Count -ge 1 -and @($lspPkgDiags[$lspPkgDiags.Count - 1].params.diagnostics).Count -eq 0) 'nik lsp live ppc* check passes with 0 errors across all cached Git and archive dependencies'
+
+        # 3f. nik pkg update upgrades shared-core in nik.lock from 1.2.0 -> 1.2.1 WITHOUT mutating nik.yaml!
+        $yamlBeforeUpdate = [System.IO.File]::ReadAllText($ConsumerYamlPath)
+        $updRes = (Invoke-Nik -NikHome $PkgTestHome -Arguments @('pkg', 'update', 'shared-core', '-m', $ConsumerDir, '--json')).Output | ConvertFrom-Json
+        $yamlAfterUpdate = [System.IO.File]::ReadAllText($ConsumerYamlPath)
+        Assert-True ($updRes.success -eq $true -and $updRes.lockUpdated -eq $true) 'nik pkg update shared-core updates nik.lock to newest compatible SemVer tag'
+        Assert-True ($yamlBeforeUpdate -eq $yamlAfterUpdate) 'nik pkg update never mutates human-authored nik.yaml'
+        $rebuiltAfterUpd = (Invoke-Nik -NikHome $PkgTestHome -Arguments @('build', '-m', $ConsumerDir, '--json')).Output | ConvertFrom-Json
+        $updRunOut = (& $rebuiltAfterUpd.output.binaryPath).Trim()
+        Assert-True ($updRunOut -match '\|1\.2\.1\|MID\(1\.2\.1,MONO_SUB\)\|') "Rebuilt binary after nik pkg update links upgraded shared-core 1.2.1 ($updRunOut)"
+
+        # 3g. Local URL override ({ url: ..., path: ... }) replaces shared-core across both root AND transitive mid-kit!
+        $OverrideSharedDir = Join-Path $WorkDir 'pkg-e2e\shared-override'
+        New-Item -ItemType Directory -Force -Path (Join-Path $OverrideSharedDir 'src') | Out-Null
+        @"
+package:
+  name: shared-core
+  version: 1.9.9-local
+  toolchain:
+    fpc: $CandidateLspFpcVersion
+  build:
+    unitPaths: [src]
+"@ | Set-Content -Path (Join-Path $OverrideSharedDir 'nik.yaml') -Encoding UTF8
+        @"
+unit SharedCoreUnit;
+{`$mode objfpc}{`$H+}
+interface
+function GetSharedVer: string;
+implementation
+function GetSharedVer: string;
+begin
+  Result := 'LOCAL_OVERRIDE';
+end;
+end.
+"@ | Set-Content -Path (Join-Path $OverrideSharedDir 'src\SharedCoreUnit.pas') -Encoding UTF8
+
+        ($BaseConsumerYaml -replace "shared-core: $([regex]::Escape($SharedUrl))@\^1\.1\.0", "shared-core:`n      url: $SharedUrl`n      path: ../shared-override") | Set-Content -Path $ConsumerYamlPath -Encoding UTF8
+        $ovrBuild = (Invoke-Nik -NikHome $PkgTestHome -Arguments @('build', '-m', $ConsumerDir, '--clean', '--json')).Output | ConvertFrom-Json
+        $ovrOut = (& $ovrBuild.output.binaryPath).Trim()
+        Assert-True ($ovrOut -match '\|LOCAL_OVERRIDE\|MID\(LOCAL_OVERRIDE,MONO_SUB\)\|') "Local url+path override substitutes remote dependency across transitive packages ($ovrOut)"
+
+        # 3h. Removing a dependency from nik.yaml prunes it cleanly from nik.lock; nik pkg fetch works on package: manifests
+        $PurePkgDir = Join-Path $WorkDir 'pkg-e2e\pure-pkg'
+        New-Item -ItemType Directory -Force -Path (Join-Path $PurePkgDir 'src') | Out-Null
+        @"
+package:
+  name: pure-pkg
+  version: 0.1.0
+  toolchain:
+    fpc: $CandidateLspFpcVersion
+  build:
+    unitPaths: [src]
+  dependencies:
+    shared-core: $SharedUrl@^1.1.0
+    mono-sub:
+      url: $MonoUrl
+      version: ^0.3.0
+      subpath: packages/sub-pkg
+"@ | Set-Content -Path (Join-Path $PurePkgDir 'nik.yaml') -Encoding UTF8
+        $fetchPkgRes = (Invoke-Nik -NikHome $PkgTestHome -Arguments @('pkg', 'fetch', '-m', $PurePkgDir, '--json')).Output | ConvertFrom-Json
+        Assert-True ($fetchPkgRes.success -eq $true -and @($fetchPkgRes.packages).Count -eq 2 -and (Test-Path (Join-Path $PurePkgDir 'nik.lock'))) 'nik pkg fetch resolves and locks dependencies for a package: manifest without entry'
+
+        # Remove mono-sub from pure-pkg/nik.yaml -> nik pkg fetch prunes mono-sub from nik.lock
+        @"
+package:
+  name: pure-pkg
+  version: 0.1.0
+  toolchain:
+    fpc: $CandidateLspFpcVersion
+  build:
+    unitPaths: [src]
+  dependencies:
+    shared-core: $SharedUrl@^1.1.0
+"@ | Set-Content -Path (Join-Path $PurePkgDir 'nik.yaml') -Encoding UTF8
+        $pruneRes = (Invoke-Nik -NikHome $PkgTestHome -Arguments @('pkg', 'fetch', '-m', $PurePkgDir, '--json')).Output | ConvertFrom-Json
+        $lockAfterPrune = [System.IO.File]::ReadAllText((Join-Path $PurePkgDir 'nik.lock'))
+        Assert-True ($pruneRes.lockUpdated -eq $true -and $lockAfterPrune -notmatch 'mono-suite') 'Deleting a dependency from nik.yaml prunes its entry from nik.lock'
+
+        # 3i. Incompatible SemVer major conflict (^2.0.0 vs mid-kit ^1.2.0) reports clear dependency chains
+        @"
+package:
+  name: conflict-pkg
+  toolchain:
+    fpc: $CandidateLspFpcVersion
+  dependencies:
+    shared-core: $SharedUrl@^2.0.0
+    mid-kit: $MidUrl@^1.0.0
+"@ | Set-Content -Path (Join-Path $PurePkgDir 'nik.yaml') -Encoding UTF8
+        $conflictRes = Invoke-Nik -NikHome $PkgTestHome -Arguments @('pkg', 'fetch', '-m', $PurePkgDir) -AllowFailure
+        Assert-True ($conflictRes.ExitCode -ne 0 -and $conflictRes.Output -match 'No SemVer tag' -and $conflictRes.Output -match 'mid-kit -> shared-core') 'Resolver reports incompatible SemVer conflict with full transitive dependency chain'
     }
 
     Write-Host "`n [OK] All nik CLI tests PASSED!" -ForegroundColor Green

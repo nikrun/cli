@@ -12,6 +12,7 @@ function GetUserHomeDir: string;
 function GetNikrunHomeDir: string;
 function GetNikrunSdksDir: string;
 function GetNikrunCacheDir: string;
+function GetNikrunPkgCacheDir: string;
 function GetNikrunBinDir: string;
 function GetNikrunTemplateFile: string;
 
@@ -158,6 +159,11 @@ end;
 function GetNikrunCacheDir: string;
 begin
   Result := JoinPath(GetNikrunHomeDir, 'cache');
+end;
+
+function GetNikrunPkgCacheDir: string;
+begin
+  Result := JoinPath(GetNikrunCacheDir, 'pkg');
 end;
 
 function GetNikrunBinDir: string;
