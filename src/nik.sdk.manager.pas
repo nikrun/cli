@@ -27,8 +27,16 @@ function ResolveRemoteSdkSpec(const AIndex: TSdkIndex;
   AExplicitArch: Boolean;
   out AUsedWinArmFallback: Boolean): TRemoteSdkEntry;
 
+function MatchRemoteSdkInstallState(const AInstalled: TInstalledSdkArray;
+  const ARemote: TRemoteSdkEntry;
+  out AMatched: TInstalledSdk;
+  out AUpdateAvailable: Boolean): Boolean;
+
 function InstallSdk(const ASpec, ATargetOs, ATargetCpu, AIndexUrl: string;
   AExplicitArch, AForce, ASkipVerify: Boolean): TInstalledSdk;
+
+function UpdateSdks(const AVersion, ATargetOs, ATargetCpu, AIndexUrl: string;
+  ASkipVerify, AQuiet: Boolean): TSdkUpdateItemArray;
 
 procedure UninstallSdk(const AVersion: string; const ATargetSpec: string = '');
 
@@ -481,8 +489,60 @@ begin
             FileExists(JoinPath(ASdkDir, AManifest.Paths.FpcBinary));
 end;
 
+function IsExactRemoteSdkMatch(const AManifest: TSdkManifest; const ARemote: TRemoteSdkEntry): Boolean;
+begin
+  if SameText(AManifest.SdkId, ARemote.SdkId) then
+    Exit(True);
+  if (ARemote.GitCommit <> '') and (AManifest.GitCommit <> '') and
+     SameText(AManifest.FpcVersion, ARemote.FpcVersion) and
+     SameText(AManifest.TargetTriplet, ARemote.TargetTriplet) and
+     SameText(AManifest.GitCommit, ARemote.GitCommit) then
+    Exit(True);
+  Result := False;
+end;
+
+function MatchRemoteSdkInstallState(const AInstalled: TInstalledSdkArray;
+  const ARemote: TRemoteSdkEntry;
+  out AMatched: TInstalledSdk;
+  out AUpdateAvailable: Boolean): Boolean;
+var
+  I: Integer;
+begin
+  Result := False;
+  AMatched := Default(TInstalledSdk);
+  AUpdateAvailable := False;
+
+  for I := 0 to High(AInstalled) do
+    if IsExactRemoteSdkMatch(AInstalled[I].Manifest, ARemote) then
+    begin
+      AMatched := AInstalled[I];
+      AUpdateAvailable := False;
+      Exit(True);
+    end;
+
+  for I := 0 to High(AInstalled) do
+    if SameText(AInstalled[I].Manifest.FpcVersion, ARemote.FpcVersion) and
+       SameText(AInstalled[I].Manifest.TargetTriplet, ARemote.TargetTriplet) then
+    begin
+      AMatched := AInstalled[I];
+      AUpdateAvailable := True;
+      Exit(True);
+    end;
+end;
+
+function ShortCommitOrUnknown(const AGitCommit: string): string;
+var
+  Trimmed: string;
+begin
+  Trimmed := LowerCase(Trim(AGitCommit));
+  if Trimmed <> '' then
+    Result := Copy(Trimmed, 1, 8)
+  else
+    Result := 'unknown';
+end;
+
 function FinalizeSdkFromZip(const AZipPath, AExpectedSha256: string;
-  AForce, ASkipVerify: Boolean): TInstalledSdk;
+  AForce, ASkipVerify: Boolean; AQuiet: Boolean = False): TInstalledSdk;
 var
   ExpectedHash, ActualHash, SidecarShaFile: string;
   StagingDir, ExtractedRoot, DestDir, FpcBinPath, CfgPath: string;
@@ -510,9 +570,10 @@ begin
           '  Expected: %s' + LineEnding +
           '  Actual  : %s',
           [ExtractFileName(AZipPath), ExpectedHash, ActualHash]);
-      WriteSuccess(Format('Verified SHA-256 checksum (%s...)', [Copy(ActualHash, 1, 16)]));
+      if not AQuiet then
+        WriteSuccess(Format('Verified SHA-256 checksum (%s...)', [Copy(ActualHash, 1, 16)]));
     end
-    else
+    else if not AQuiet then
       WriteInfo(Format('Archive SHA-256: %s', [ActualHash]));
   end;
 
@@ -522,7 +583,8 @@ begin
     DeleteDirectoryRecursive(StagingDir);
 
   try
-    WriteStep('Extracting SDK archive...');
+    if not AQuiet then
+      WriteStep('Extracting SDK archive...');
     ExtractZipArchive(AZipPath, StagingDir);
     ExtractedRoot := LocateExtractedSdkRoot(StagingDir);
     Manifest := LoadSdkManifest(ExtractedRoot);
@@ -536,8 +598,9 @@ begin
     begin
       if not AForce then
       begin
-        WriteInfo(Format('SDK ''%s'' is already installed at %s (use --force to reinstall).',
-          [Manifest.SdkId, DestDir]));
+        if not AQuiet then
+          WriteInfo(Format('SDK ''%s'' is already installed at %s (use --force to reinstall).',
+            [Manifest.SdkId, DestDir]));
         Result.Manifest := Manifest;
         Result.InstallPath := DestDir;
         Exit;
@@ -552,8 +615,11 @@ begin
       EnsureBinariesExecutable(JoinPath(DestDir, Manifest.Paths.BinDir));
 
     CfgPath := GenerateFpcCfgForSdk(DestDir, Manifest);
-    WriteSuccess('Installed SDK to: ' + DestDir);
-    WriteSuccess('Generated isolated fpc.cfg: ' + CfgPath);
+    if not AQuiet then
+    begin
+      WriteSuccess('Installed SDK to: ' + DestDir);
+      WriteSuccess('Generated isolated fpc.cfg: ' + CfgPath);
+    end;
 
     Result.Manifest := Manifest;
     Result.InstallPath := DestDir;
@@ -647,10 +713,52 @@ begin
   Result := False;
 end;
 
+function DownloadAndInstallRemoteEntry(const AEntry: TRemoteSdkEntry;
+  AForce, ASkipVerify, AQuiet: Boolean): TInstalledSdk;
+var
+  CacheDir, PartFile, DownloadedZip: string;
+  ProgressCb: TDownloadProgressProc;
+begin
+  CacheDir := GetNikrunCacheDir;
+  EnsureDirExists(CacheDir);
+  DownloadedZip := JoinPath(CacheDir, AEntry.FileName);
+  PartFile := DownloadedZip + '.part';
+  if FileExists(PartFile) then
+    DeleteFile(PartFile);
+
+  if AQuiet then
+    ProgressCb := nil
+  else
+  begin
+    ProgressCb := @OnSdkDownloadProgress;
+    WriteStep(Format('Downloading %s (%s)...', [AEntry.SdkId, FormatByteSize(AEntry.SizeBytes)]));
+  end;
+
+  try
+    HttpDownloadFile(AEntry.DownloadUrl, PartFile, ProgressCb, AEntry.SizeBytes);
+    if not AQuiet then
+      FinishProgress;
+
+    if FileExists(DownloadedZip) then
+      DeleteFile(DownloadedZip);
+    if not RenameFile(PartFile, DownloadedZip) then
+      raise ENikError.CreateFmt('Failed to finalize downloaded file: %s', [DownloadedZip]);
+
+    Result := FinalizeSdkFromZip(DownloadedZip, AEntry.Sha256, AForce, ASkipVerify, AQuiet);
+  finally
+    if not AQuiet then
+      FinishProgress;
+    if FileExists(PartFile) then
+      DeleteFile(PartFile);
+    if FileExists(DownloadedZip) then
+      DeleteFile(DownloadedZip);
+  end;
+end;
+
 function InstallSdk(const ASpec, ATargetOs, ATargetCpu, AIndexUrl: string;
   AExplicitArch, AForce, ASkipVerify: Boolean): TInstalledSdk;
 var
-  LocalPath, DestDir, CacheDir, PartFile, DownloadedZip, CfgPath: string;
+  LocalPath, DestDir, CfgPath: string;
   Index: TSdkIndex;
   Entry: TRemoteSdkEntry;
   UsedFallback: Boolean;
@@ -709,30 +817,208 @@ begin
     Exit;
   end;
 
-  CacheDir := GetNikrunCacheDir;
-  EnsureDirExists(CacheDir);
-  DownloadedZip := JoinPath(CacheDir, Entry.FileName);
-  PartFile := DownloadedZip + '.part';
-  if FileExists(PartFile) then
-    DeleteFile(PartFile);
+  Result := DownloadAndInstallRemoteEntry(Entry, AForce, ASkipVerify, False);
+end;
 
-  WriteStep(Format('Downloading %s (%s)...', [Entry.SdkId, FormatByteSize(Entry.SizeBytes)]));
-  try
-    HttpDownloadFile(Entry.DownloadUrl, PartFile, @OnSdkDownloadProgress, Entry.SizeBytes);
-    FinishProgress;
+type
+  TInstalledTargetGroup = record
+    FpcVersion: string;
+    TargetOs: string;
+    TargetCpu: string;
+    TargetTriplet: string;
+    Snapshots: TInstalledSdkArray;
+  end;
+  TInstalledTargetGroupArray = array of TInstalledTargetGroup;
 
-    if FileExists(DownloadedZip) then
-      DeleteFile(DownloadedZip);
-    if not RenameFile(PartFile, DownloadedZip) then
-      raise ENikError.CreateFmt('Failed to finalize downloaded file: %s', [DownloadedZip]);
+function FindExactRemoteEntryForTarget(const AIndex: TSdkIndex;
+  const AFpcVersion, ATargetOs, ATargetCpu: string;
+  out AEntry: TRemoteSdkEntry): Boolean;
+var
+  I: Integer;
+begin
+  Result := False;
+  AEntry := Default(TRemoteSdkEntry);
+  for I := 0 to High(AIndex.Sdks) do
+    if SameText(AIndex.Sdks[I].FpcVersion, AFpcVersion) and
+       SameText(AIndex.Sdks[I].TargetOs, ATargetOs) and
+       SameText(AIndex.Sdks[I].TargetCpu, ATargetCpu) then
+    begin
+      AEntry := AIndex.Sdks[I];
+      Exit(True);
+    end;
+end;
 
-    Result := FinalizeSdkFromZip(DownloadedZip, Entry.Sha256, AForce, ASkipVerify);
-  finally
-    FinishProgress;
-    if FileExists(PartFile) then
-      DeleteFile(PartFile);
-    if FileExists(DownloadedZip) then
-      DeleteFile(DownloadedZip);
+function UpdateSdks(const AVersion, ATargetOs, ATargetCpu, AIndexUrl: string;
+  ASkipVerify, AQuiet: Boolean): TSdkUpdateItemArray;
+var
+  TrimmedVer, OsFilter, ArchFilter, TargetSpec, CfgPath, NormKeep, NormSnap: string;
+  Installed: TInstalledSdkArray;
+  Groups: TInstalledTargetGroupArray;
+  I, J, GroupIdx, SnapCount, ExactIdx, ResCount, RemCount: Integer;
+  Index: TSdkIndex;
+  Entry: TRemoteSdkEntry;
+  ExistingManifest: TSdkManifest;
+  CurrentSdk, PrevSnap: TInstalledSdk;
+  RemovedPaths: TStringArray;
+  Item: TSdkUpdateItem;
+begin
+  Result := nil;
+  Groups := nil;
+  TrimmedVer := Trim(AVersion);
+  OsFilter := LowerCase(Trim(ATargetOs));
+  ArchFilter := LowerCase(Trim(ATargetCpu));
+
+  if (TrimmedVer <> '') and (not IsExactFpcVersion(TrimmedVer)) then
+    raise ENikError.CreateFmt(
+      'Invalid Free Pascal SDK version ''%s'' (expected exact <major>.<minor>.<patch> version such as ''3.2.2'' or ''3.3.1'').',
+      [TrimmedVer]);
+
+  Installed := ListInstalledSdks;
+  for I := 0 to High(Installed) do
+  begin
+    if (TrimmedVer <> '') and (not SameText(Installed[I].Manifest.FpcVersion, TrimmedVer)) then
+      Continue;
+    if (OsFilter <> '') and (not SameText(Installed[I].Manifest.TargetOs, OsFilter)) then
+      Continue;
+    if (ArchFilter <> '') and (not SameText(Installed[I].Manifest.TargetCpu, ArchFilter)) then
+      Continue;
+
+    GroupIdx := -1;
+    for J := 0 to High(Groups) do
+      if SameText(Groups[J].FpcVersion, Installed[I].Manifest.FpcVersion) and
+         SameText(Groups[J].TargetTriplet, Installed[I].Manifest.TargetTriplet) then
+      begin
+        GroupIdx := J;
+        Break;
+      end;
+
+    if GroupIdx < 0 then
+    begin
+      GroupIdx := Length(Groups);
+      SetLength(Groups, GroupIdx + 1);
+      Groups[GroupIdx].FpcVersion := Installed[I].Manifest.FpcVersion;
+      Groups[GroupIdx].TargetOs := Installed[I].Manifest.TargetOs;
+      Groups[GroupIdx].TargetCpu := Installed[I].Manifest.TargetCpu;
+      Groups[GroupIdx].TargetTriplet := Installed[I].Manifest.TargetTriplet;
+      Groups[GroupIdx].Snapshots := nil;
+    end;
+
+    SnapCount := Length(Groups[GroupIdx].Snapshots);
+    SetLength(Groups[GroupIdx].Snapshots, SnapCount + 1);
+    Groups[GroupIdx].Snapshots[SnapCount] := Installed[I];
+  end;
+
+  if Length(Groups) = 0 then
+  begin
+    if TrimmedVer <> '' then
+    begin
+      TargetSpec := BuildTargetTripletFilter(OsFilter, ArchFilter);
+      if TargetSpec <> '' then
+        raise ENikError.CreateFmt(
+          'Installed Free Pascal SDK ''%s'' for target ''%s'' not found. Run ''nik sdk list'' or install it with ''nik sdk install %s''.',
+          [TrimmedVer, TargetSpec, TrimmedVer])
+      else
+        raise ENikError.CreateFmt(
+          'Installed Free Pascal SDK ''%s'' not found. Run ''nik sdk install %s'' first.',
+          [TrimmedVer, TrimmedVer]);
+    end;
+    Exit;
+  end;
+
+  if not AQuiet then
+    WriteStep('Fetching remote SDK index...');
+  Index := FetchRemoteSdkIndex(AIndexUrl);
+
+  ResCount := 0;
+  for I := 0 to High(Groups) do
+  begin
+    if not FindExactRemoteEntryForTarget(Index, Groups[I].FpcVersion,
+      Groups[I].TargetOs, Groups[I].TargetCpu, Entry) then
+    begin
+      if TrimmedVer <> '' then
+        raise ENikError.CreateFmt(
+          'No prebuilt SDK version ''%s'' found for target %s in remote index. Run ''nik sdk list --remote'' to inspect available versions.',
+          [Groups[I].FpcVersion, Groups[I].TargetTriplet]);
+      if not AQuiet then
+        WriteWarn(Format('Skipping FPC %s (%s): no matching prebuilt SDK in remote index.',
+          [Groups[I].FpcVersion, Groups[I].TargetTriplet]));
+      Continue;
+    end;
+
+    ExactIdx := -1;
+    for J := 0 to High(Groups[I].Snapshots) do
+      if IsExactRemoteSdkMatch(Groups[I].Snapshots[J].Manifest, Entry) and
+         IsValidInstalledSdkDir(Groups[I].Snapshots[J].InstallPath, ExistingManifest) then
+      begin
+        ExactIdx := J;
+        Break;
+      end;
+
+    PrevSnap := Groups[I].Snapshots[0];
+    if (ExactIdx = 0) and (Length(Groups[I].Snapshots) > 1) then
+      PrevSnap := Groups[I].Snapshots[1];
+
+    if ExactIdx >= 0 then
+    begin
+      CurrentSdk.InstallPath := Groups[I].Snapshots[ExactIdx].InstallPath;
+      CurrentSdk.Manifest := LoadSdkManifest(CurrentSdk.InstallPath);
+      CfgPath := JoinPath(JoinPath(CurrentSdk.InstallPath, CurrentSdk.Manifest.Paths.BinDir), 'fpc.cfg');
+      if not FileExists(CfgPath) then
+        GenerateFpcCfgForSdk(CurrentSdk.InstallPath, CurrentSdk.Manifest);
+    end
+    else
+    begin
+      if not AQuiet then
+        WriteStep(Format('Updating FPC %s (%s): %s -> %s...',
+          [Groups[I].FpcVersion, Groups[I].TargetTriplet,
+           ShortCommitOrUnknown(PrevSnap.Manifest.GitCommit),
+           ShortCommitOrUnknown(Entry.GitCommit)]));
+      CurrentSdk := DownloadAndInstallRemoteEntry(Entry, True, ASkipVerify, AQuiet);
+    end;
+
+    NormKeep := ExcludeTrailingPathDelimiter(ExpandFileName(CurrentSdk.InstallPath));
+    RemovedPaths := nil;
+    RemCount := 0;
+    for J := 0 to High(Groups[I].Snapshots) do
+    begin
+      NormSnap := ExcludeTrailingPathDelimiter(ExpandFileName(Groups[I].Snapshots[J].InstallPath));
+      if (not SameText(NormSnap, NormKeep)) and DirectoryExists(Groups[I].Snapshots[J].InstallPath) then
+      begin
+        DeleteDirectoryRecursive(Groups[I].Snapshots[J].InstallPath);
+        SetLength(RemovedPaths, RemCount + 1);
+        RemovedPaths[RemCount] := Groups[I].Snapshots[J].InstallPath;
+        Inc(RemCount);
+        if not AQuiet then
+          WriteSuccess('Removed superseded SDK directory: ' + Groups[I].Snapshots[J].InstallPath);
+      end;
+    end;
+
+    Item := Default(TSdkUpdateItem);
+    Item.FpcVersion := Groups[I].FpcVersion;
+    Item.TargetOs := Groups[I].TargetOs;
+    Item.TargetCpu := Groups[I].TargetCpu;
+    Item.TargetTriplet := Groups[I].TargetTriplet;
+    Item.PreviousSdkId := PrevSnap.Manifest.SdkId;
+    Item.PreviousCommit := PrevSnap.Manifest.GitCommit;
+    Item.CurrentSdkId := CurrentSdk.Manifest.SdkId;
+    Item.CurrentCommit := CurrentSdk.Manifest.GitCommit;
+    Item.InstallPath := CurrentSdk.InstallPath;
+    Item.RemovedPaths := RemovedPaths;
+
+    if (ExactIdx < 0) or (RemCount > 0) then
+      Item.Action := suaUpdated
+    else
+    begin
+      Item.Action := suaUpToDate;
+      if not AQuiet then
+        WriteSuccess(Format('FPC %s (%s) is already up to date (%s).',
+          [Groups[I].FpcVersion, Groups[I].TargetTriplet,
+           ShortCommitOrUnknown(CurrentSdk.Manifest.GitCommit)]));
+    end;
+
+    SetLength(Result, ResCount + 1);
+    Result[ResCount] := Item;
+    Inc(ResCount);
   end;
 end;
 

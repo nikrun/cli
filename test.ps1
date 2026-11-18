@@ -348,7 +348,7 @@ try {
     Assert-True ($help.Output -match 'COMMANDS:' -and $help.Output -match 'init' -and $help.Output -match 'sdk') 'nik --help lists init and sdk commands'
 
     $sdkHelp = Invoke-Nik -NikHome $TestHome -Arguments @('sdk', '--help')
-    Assert-True ($sdkHelp.Output -match 'install' -and $sdkHelp.Output -notmatch '\bdefault\b' -and $sdkHelp.Output -match 'uninstall' -and $sdkHelp.Output -match 'info') 'nik sdk --help lists subcommands without removed default command'
+    Assert-True ($sdkHelp.Output -match 'install' -and $sdkHelp.Output -match 'update' -and $sdkHelp.Output -notmatch '\bdefault\b' -and $sdkHelp.Output -match 'uninstall' -and $sdkHelp.Output -match 'info') 'nik sdk --help lists subcommands including update without removed default command'
 
     # 2. Empty local list & verify nik sdk default is removed
     $emptyJson = (Invoke-Nik -NikHome $TestHome -Arguments @('sdk', 'list', '--json')).Output | ConvertFrom-Json
@@ -401,13 +401,60 @@ try {
     $listTwo = $listTwoRaw | ConvertFrom-Json
     Assert-True ($listTwo.sdks.Count -eq 2 -and $null -eq $listTwo.PSObject.Properties['defaultSdkId'] -and $null -eq $listTwo.sdks[0].PSObject.Properties['default']) 'nik sdk list --json lists both installed SDKs cleanly without default properties'
 
-    # 7b. Human table layout checks (VERSION TARGET PATH only)
+    # 7b. Human table layout checks (VERSION TARGET COMMIT PATH & INSTALLED commit column)
     $localHuman = (Invoke-Nik -NikHome $TestHome -Arguments @('sdk', 'list')).Output
-    Assert-True ($localHuman -match '(?m)^VERSION\s+TARGET\s+PATH\r?$' -and $localHuman -cnotmatch 'DEFAULT' -and $localHuman -cnotmatch 'SDK ID') 'nik sdk list displays VERSION TARGET PATH header without DEFAULT or SDK ID'
+    Assert-True ($localHuman -match '(?m)^VERSION\s+TARGET\s+COMMIT\s+PATH\r?$' -and $localHuman -match '0d122c49' -and $localHuman -cnotmatch 'DEFAULT' -and $localHuman -cnotmatch 'SDK ID') 'nik sdk list displays VERSION TARGET COMMIT PATH header without DEFAULT or SDK ID'
 
     $remoteHuman = (Invoke-Nik -NikHome $TestHome -Arguments @('sdk', 'list', '--remote', '--index-url', $IndexUrl)).Output
-    Assert-True ($remoteHuman -match '(?m)^VERSION\s+TARGET\s+COMMIT\s+SIZE\s+INSTALLED$' -and $remoteHuman -notmatch 'SDK ID' -and $remoteHuman -notmatch 'available') 'nik sdk list --remote displays clean VERSION TARGET COMMIT SIZE INSTALLED header'
-    Assert-True ($remoteHuman -match '(?m)^3\.2\.2\s+.*\s+Yes$' -and $remoteHuman -match '(?m)^9\.9\.9\s+(?!.*Yes).*$') 'nik sdk list --remote marks installed SDKs with Yes and leaves uninstalled blank'
+    Assert-True ($remoteHuman -match '(?m)^VERSION\s+TARGET\s+COMMIT\s+SIZE\s+INSTALLED\r?$' -and $remoteHuman -notmatch 'SDK ID') 'nik sdk list --remote displays clean VERSION TARGET COMMIT SIZE INSTALLED header'
+    Assert-True ($remoteHuman -match '(?m)^3\.2\.2\s+\S+\s+0d122c49\s+\S+\s+\S+\s+0d122c49\r?$' -and $remoteHuman -match '(?m)^9\.9\.9\s+\S+\s+deadbeef\s+\d+\.\d+\s+\S+\r?$') 'nik sdk list --remote shows installed commit in INSTALLED column and leaves uninstalled blank'
+
+    # 7c. Outdated / legacy commit detection & nik sdk update lifecycle
+    $UpdateHome = Join-Path $WorkDir 'nikrun-update-home'
+    $UpdateSdksDir = Join-Path $UpdateHome 'sdks'
+    New-Item -ItemType Directory -Force -Path $UpdateSdksDir | Out-Null
+
+    # Seed a legacy 3.2.2 SDK directory without gitCommit (old sdkId format)
+    $LegacySdkId = "nikrun-fpc-sdk-3.2.2-$HostOs-$Arch322"
+    $LegacyDir = Join-Path $UpdateSdksDir $LegacySdkId
+    Copy-Item -Recurse -Force (Join-Path $StageRoot $Mock322.SdkId) $LegacyDir
+    $LegacyManifestPath = Join-Path $LegacyDir 'sdk-manifest.json'
+    $LegacyManifest = Get-Content -Path $LegacyManifestPath -Raw | ConvertFrom-Json
+    $LegacyManifest.sdkId = $LegacySdkId
+    $LegacyManifest.PSObject.Properties.Remove('gitCommit')
+    $LegacyManifest.PSObject.Properties.Remove('gitCommitShort')
+    $LegacyManifest | ConvertTo-Json -Depth 5 | Set-Content -Path $LegacyManifestPath -Encoding UTF8
+
+    # Also seed an older commit of 3.3.1
+    $Mock331Old = New-MockSdkZip -Version '3.3.1' -GitRef 'main' -GitCommit '1111222233334444555566667777888899990000' -TargetOs $HostOs -TargetCpu $HostCpu
+    $null = Invoke-Nik -NikHome $UpdateHome -Arguments @('sdk', 'install', $Mock331Old.ZipPath)
+
+    $updLocalOut = (Invoke-Nik -NikHome $UpdateHome -Arguments @('sdk', 'list')).Output
+    Assert-True ($updLocalOut -match '(?m)^3\.2\.2\s+\S+\s+unknown\s+' -and $updLocalOut -match '(?m)^3\.3\.1\s+\S+\s+11112222\s+') 'nik sdk list shows unknown for legacy manifest without gitCommit and short SHA for commit-tracked SDK'
+
+    $updRemOut = (Invoke-Nik -NikHome $UpdateHome -Arguments @('sdk', 'list', '--remote', '--index-url', $IndexUrl)).Output
+    Assert-True ($updRemOut -match '(?m)^3\.2\.2\s+.*\s+unknown \(update\)\r?$' -and $updRemOut -match '(?m)^3\.3\.1\s+.*\s+11112222 \(update\)\r?$') 'nik sdk list --remote flags both legacy unknown and older commit SDKs with (update)'
+
+    $updRemJson = (Invoke-Nik -NikHome $UpdateHome -Arguments @('sdk', 'list', '--remote', '--index-url', $IndexUrl, '--json')).Output | ConvertFrom-Json
+    $rem322Item = $updRemJson.sdks | Where-Object { $_.fpcVersion -eq '3.2.2' }
+    $rem331Item = $updRemJson.sdks | Where-Object { $_.fpcVersion -eq '3.3.1' }
+    Assert-True ($rem322Item.installed -eq $true -and $rem322Item.updateAvailable -eq $true -and $null -eq $rem322Item.installedCommit -and $rem331Item.installed -eq $true -and $rem331Item.updateAvailable -eq $true -and $rem331Item.installedCommit -eq $Mock331Old.GitCommit) 'nik sdk list --remote --json reports installed, updateAvailable, and installedCommit accurately'
+
+    # Verify nik sdk install leaves existing older snapshot directory intact
+    $null = Invoke-Nik -NikHome $UpdateHome -Arguments @('sdk', 'install', '3.3.1', '--index-url', $IndexUrl)
+    Assert-True ((Test-Path (Join-Path $UpdateSdksDir $Mock331Old.SdkId)) -and (Test-Path (Join-Path $UpdateSdksDir $Mock331.SdkId))) 'nik sdk install leaves older snapshot directory untouched'
+
+    # Run nik sdk update (updates 3.2.2 from remote and prunes superseded 3.2.2 + 3.3.1 directories)
+    $updResJson = (Invoke-Nik -NikHome $UpdateHome -Arguments @('sdk', 'update', '--index-url', $IndexUrl, '--json')).Output | ConvertFrom-Json
+    Assert-True ($updResJson.updatedCount -eq 2 -and $updResJson.upToDateCount -eq 0) 'nik sdk update --json updates outdated SDKs and prunes superseded snapshots'
+    Assert-True ((-not (Test-Path $LegacyDir)) -and (Test-Path (Join-Path $UpdateSdksDir $Mock322.SdkId)) -and (-not (Test-Path (Join-Path $UpdateSdksDir $Mock331Old.SdkId))) -and (Test-Path (Join-Path $UpdateSdksDir $Mock331.SdkId))) 'nik sdk update removes superseded snapshot folders while keeping current SDKs'
+
+    # Subsequent nik sdk update reports everything up to date
+    $updNoopJson = (Invoke-Nik -NikHome $UpdateHome -Arguments @('sdk', 'update', '--index-url', $IndexUrl, '--json')).Output | ConvertFrom-Json
+    Assert-True ($updNoopJson.updatedCount -eq 0 -and $updNoopJson.upToDateCount -eq 2) 'Second nik sdk update reports all installed SDKs up to date'
+
+    $updMissing = Invoke-Nik -NikHome $UpdateHome -Arguments @('sdk', 'update', '3.2.4', '--index-url', $IndexUrl) -AllowFailure
+    Assert-True ($updMissing.ExitCode -ne 0 -and $updMissing.Output -match 'not found') 'nik sdk update <uninstalled-version> fails cleanly'
 
     # 8. nik sdk info requires explicit <version> and rejects missing argument or SDK IDs
     $infoNoArg = Invoke-Nik -NikHome $TestHome -Arguments @('sdk', 'info') -AllowFailure

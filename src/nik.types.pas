@@ -82,6 +82,23 @@ type
     Sdks: TRemoteSdkArray;
   end;
 
+  TSdkUpdateAction = (suaUpToDate, suaUpdated);
+
+  TSdkUpdateItem = record
+    FpcVersion: string;
+    TargetOs: string;
+    TargetCpu: string;
+    TargetTriplet: string;
+    Action: TSdkUpdateAction;
+    PreviousSdkId: string;
+    PreviousCommit: string;
+    CurrentSdkId: string;
+    CurrentCommit: string;
+    InstallPath: string;
+    RemovedPaths: TStringArray;
+  end;
+  TSdkUpdateItemArray = array of TSdkUpdateItem;
+
   TDownloadProgressProc = procedure(ABytesRead, ATotalBytes: Int64);
 
 implementation

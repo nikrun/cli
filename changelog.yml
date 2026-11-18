@@ -3,8 +3,9 @@ changelog:
     changes:
       added:
         - 'Initial release of the `nik` CLI and standalone `nikrun-lsp-protocol` library'
-        - 'Add `nik sdk` commands (`list`, `install`, `info`, `uninstall`) with SHA-256 verification and `--json` output'
+        - 'Add `nik sdk` commands (`list`, `install`, `update`, `info`, `uninstall`) with commit-aware update detection, SHA-256 verification, and `--json` output'
         - 'Add `nik init` project scaffolder (`--program`, `--lib`, `--pkg`) with `~/.nikrun/template.yaml` blueprint support'
+        - 'Add `nik pkg` decentralized URL and local-path package manager (`fetch`, `update`, `list`, `info`) with MVS and `nik.lock` SHA-256 verification'
         - 'Add `nik build` declarative compiler orchestrator over `nik.yaml` (`targets`, `profiles`, structured `--json` diagnostics)'
         - 'Add `nik lsp` built-in Free Pascal Language Server (LSP 3.17) with live unsaved buffer overlays, diagnostics, symbols, Go to Definition, Hover, Signature Help, and Completion'
       changed: []

@@ -25,6 +25,7 @@ begin
   WriteLn(StyleBold('SUBCOMMANDS:'));
   WriteLn('  ' + PadRightStr('list', 14) + 'List locally installed SDKs (or remote SDKs with --remote)');
   WriteLn('  ' + PadRightStr('install', 14) + 'Download, verify, and install an SDK (version or local SDK)');
+  WriteLn('  ' + PadRightStr('update', 14) + 'Update installed SDKs to the latest remote build');
   WriteLn('  ' + PadRightStr('uninstall', 14) + 'Remove a locally installed SDK by version');
   WriteLn('  ' + PadRightStr('info', 14) + 'Display details and verified paths of an installed SDK');
   WriteLn('  ' + PadRightStr('help', 14) + 'Show help for sdk commands');
@@ -34,6 +35,8 @@ begin
   WriteLn('  nik sdk list --remote');
   WriteLn('  nik sdk install 3.2.2');
   WriteLn('  nik sdk install 3.3.1');
+  WriteLn('  nik sdk update');
+  WriteLn('  nik sdk update 3.3.1');
   WriteLn('  nik sdk install ./dist/nikrun-fpc-sdk-3.2.4-66940ee6-x86_64-win64.zip');
   WriteLn('  nik sdk info 3.2.2');
   WriteLn('  nik sdk uninstall 3.3.1');
@@ -72,6 +75,25 @@ begin
   WriteLn('      --os <OS>          Override target OS when resolving version');
   WriteLn('      --arch <CPU>       Override target CPU when resolving version');
   WriteLn('      --index-url <URL>  Override remote index.json URL or file path');
+  WriteLn('  -h, --help             Show this help message');
+end;
+
+procedure PrintSdkUpdateHelp;
+begin
+  WriteLn(StyleBold('Update installed Free Pascal SDKs to the latest remote build'));
+  WriteLn;
+  WriteLn(StyleBold('USAGE:'));
+  WriteLn('  nik sdk update [<VERSION>] [OPTIONS]');
+  WriteLn;
+  WriteLn(StyleBold('ARGUMENTS:'));
+  WriteLn('  [<VERSION>]            Installed FPC version to update (updates all installed SDKs when omitted)');
+  WriteLn;
+  WriteLn(StyleBold('OPTIONS:'));
+  WriteLn('      --skip-verify      Skip SHA-256 checksum verification');
+  WriteLn('      --os <OS>          Filter target OS when updating (win64, linux, darwin)');
+  WriteLn('      --arch <CPU>       Filter target CPU when updating (x86_64, aarch64)');
+  WriteLn('      --index-url <URL>  Override remote index.json URL or file path');
+  WriteLn('      --json             Output machine-readable JSON');
   WriteLn('  -h, --help             Show this help message');
 end;
 
@@ -139,17 +161,21 @@ begin
 end;
 
 function ShortCommitStr(const AGitCommit: string): string;
+var
+  Trimmed: string;
 begin
-  if AGitCommit <> '' then
-    Result := Copy(AGitCommit, 1, 8)
+  Trimmed := LowerCase(Trim(AGitCommit));
+  if Trimmed <> '' then
+    Result := Copy(Trimmed, 1, 8)
   else
-    Result := '-';
+    Result := 'unknown';
 end;
 
 function HandleListLocal(const AVersionFilter, AOsFilter, AArchFilter: string; AJson: Boolean): Integer;
 var
   AllInstalled, Filtered: TInstalledSdkArray;
-  I, Count, WVersion, WTarget: Integer;
+  I, Count, WVersion, WTarget, WCommit: Integer;
+  CommitStr: string;
   Root: TJSONObject;
   Arr: TJSONArray;
   ItemObj: TJSONObject;
@@ -211,33 +237,31 @@ begin
 
   WVersion := Length('VERSION');
   WTarget  := Length('TARGET');
+  WCommit  := Length('COMMIT');
 
   for I := 0 to High(Filtered) do
   begin
-    WVersion := MaxIntVal(WVersion, Length(Filtered[I].Manifest.FpcVersion));
-    WTarget  := MaxIntVal(WTarget, Length(Filtered[I].Manifest.TargetTriplet));
+    CommitStr := ShortCommitStr(Filtered[I].Manifest.GitCommit);
+    WVersion  := MaxIntVal(WVersion, Length(Filtered[I].Manifest.FpcVersion));
+    WTarget   := MaxIntVal(WTarget, Length(Filtered[I].Manifest.TargetTriplet));
+    WCommit   := MaxIntVal(WCommit, Length(CommitStr));
   end;
 
   WriteLn(StyleBold(
     PadRightStr('VERSION', WVersion + 2) +
     PadRightStr('TARGET', WTarget + 2) +
+    PadRightStr('COMMIT', WCommit + 2) +
     'PATH'));
 
   for I := 0 to High(Filtered) do
+  begin
+    CommitStr := ShortCommitStr(Filtered[I].Manifest.GitCommit);
     WriteLn(
       PadRightStr(Filtered[I].Manifest.FpcVersion, WVersion + 2) +
       PadRightStr(Filtered[I].Manifest.TargetTriplet, WTarget + 2) +
+      StyleDim(PadRightStr(CommitStr, WCommit + 2)) +
       StyleDim(Filtered[I].InstallPath));
-end;
-
-function IsRemoteSdkInstalled(const AInstalled: TInstalledSdkArray; const ASdkId: string): Boolean;
-var
-  I: Integer;
-begin
-  for I := 0 to High(AInstalled) do
-    if SameText(AInstalled[I].Manifest.SdkId, ASdkId) then
-      Exit(True);
-  Result := False;
+  end;
 end;
 
 function HandleListRemote(const AVersionFilter, AOsFilter, AArchFilter, AIndexUrl: string;
@@ -245,10 +269,11 @@ function HandleListRemote(const AVersionFilter, AOsFilter, AArchFilter, AIndexUr
 var
   Index: TSdkIndex;
   Installed: TInstalledSdkArray;
+  MatchedSdk: TInstalledSdk;
   Filtered: TRemoteSdkArray;
   I, Count, WVersion, WTarget, WCommit, WSize: Integer;
-  IsInst: Boolean;
-  CommitStr, SizeStr: string;
+  HasInst, UpdateAvail: Boolean;
+  CommitStr, SizeStr, InstCommitStr, InstLabel: string;
   Root, ItemObj: TJSONObject;
   Arr: TJSONArray;
 begin
@@ -282,7 +307,7 @@ begin
       Root.Add('updatedAtUtc', Index.UpdatedAtUtc);
       for I := 0 to High(Filtered) do
       begin
-        IsInst := IsRemoteSdkInstalled(Installed, Filtered[I].SdkId);
+        HasInst := MatchRemoteSdkInstallState(Installed, Filtered[I], MatchedSdk, UpdateAvail);
         ItemObj := TJSONObject.Create;
         ItemObj.Add('sdkId', Filtered[I].SdkId);
         ItemObj.Add('fpcVersion', Filtered[I].FpcVersion);
@@ -296,7 +321,21 @@ begin
         ItemObj.Add('sizeBytes', Filtered[I].SizeBytes);
         ItemObj.Add('sha256', Filtered[I].Sha256);
         ItemObj.Add('downloadUrl', Filtered[I].DownloadUrl);
-        ItemObj.Add('installed', IsInst);
+        ItemObj.Add('installed', HasInst);
+        ItemObj.Add('updateAvailable', UpdateAvail);
+        if HasInst then
+        begin
+          ItemObj.Add('installedSdkId', MatchedSdk.Manifest.SdkId);
+          if Trim(MatchedSdk.Manifest.GitCommit) <> '' then
+            ItemObj.Add('installedCommit', MatchedSdk.Manifest.GitCommit)
+          else
+            ItemObj.Add('installedCommit', TJSONNull.Create);
+        end
+        else
+        begin
+          ItemObj.Add('installedSdkId', TJSONNull.Create);
+          ItemObj.Add('installedCommit', TJSONNull.Create);
+        end;
         Arr.Add(ItemObj);
       end;
       Root.Add('sdks', Arr);
@@ -337,17 +376,25 @@ begin
 
   for I := 0 to High(Filtered) do
   begin
-    IsInst := IsRemoteSdkInstalled(Installed, Filtered[I].SdkId);
+    HasInst := MatchRemoteSdkInstallState(Installed, Filtered[I], MatchedSdk, UpdateAvail);
     CommitStr := ShortCommitStr(Filtered[I].GitCommit);
     SizeStr   := FormatByteSize(Filtered[I].SizeBytes);
 
-    if IsInst then
+    if HasInst then
+    begin
+      InstCommitStr := ShortCommitStr(MatchedSdk.Manifest.GitCommit);
+      if UpdateAvail then
+        InstLabel := StyleYellow(InstCommitStr + ' (update)')
+      else
+        InstLabel := StyleGreen(InstCommitStr);
+
       WriteLn(
         PadRightStr(Filtered[I].FpcVersion, WVersion + 2) +
         PadRightStr(Filtered[I].TargetTriplet, WTarget + 2) +
         StyleDim(PadRightStr(CommitStr, WCommit + 2)) +
         PadRightStr(SizeStr, WSize + 2) +
-        StyleGreen('Yes'))
+        InstLabel);
+    end
     else
       WriteLn(
         PadRightStr(Filtered[I].FpcVersion, WVersion + 2) +
@@ -465,6 +512,135 @@ begin
   end;
 
   InstallSdk(Spec, TargetOs, TargetCpu, IndexUrl, ExplicitArch, Force, SkipVerify);
+  Result := 0;
+end;
+
+function ExecuteSdkUpdate(const AArgs: array of string): Integer;
+var
+  I, J, UpdatedCount, UpToDateCount: Integer;
+  Arg, Val, Version, TargetOs, TargetCpu, IndexUrl, ActionStr: string;
+  SkipVerify, IsJson: Boolean;
+  Items: TSdkUpdateItemArray;
+  Root, ItemObj: TJSONObject;
+  Arr, RemArr: TJSONArray;
+begin
+  Version := '';
+  TargetOs := '';
+  TargetCpu := '';
+  IndexUrl := '';
+  SkipVerify := False;
+  IsJson := False;
+
+  I := Low(AArgs);
+  while I <= High(AArgs) do
+  begin
+    Arg := AArgs[I];
+    if (Arg = '-h') or (Arg = '--help') then
+    begin
+      PrintSdkUpdateHelp;
+      Exit(0);
+    end
+    else if Arg = '--skip-verify' then
+      SkipVerify := True
+    else if Arg = '--json' then
+      IsJson := True
+    else if Arg = '--os' then
+      TargetOs := NextOptValue(AArgs, I, '--os')
+    else if SplitOptEq(Arg, '--os', Val) then
+      TargetOs := Val
+    else if Arg = '--arch' then
+      TargetCpu := NextOptValue(AArgs, I, '--arch')
+    else if SplitOptEq(Arg, '--arch', Val) then
+      TargetCpu := Val
+    else if Arg = '--index-url' then
+      IndexUrl := NextOptValue(AArgs, I, '--index-url')
+    else if SplitOptEq(Arg, '--index-url', Val) then
+      IndexUrl := Val
+    else if (Length(Arg) > 0) and (Arg[1] = '-') then
+      raise ENikError.CreateFmt('Unknown option for ''nik sdk update'': %s', [Arg])
+    else if Version = '' then
+      Version := Arg
+    else
+      raise ENikError.CreateFmt('Unexpected extra argument for ''nik sdk update'': %s', [Arg]);
+    Inc(I);
+  end;
+
+  Items := UpdateSdks(Version, TargetOs, TargetCpu, IndexUrl, SkipVerify, IsJson);
+
+  UpdatedCount := 0;
+  UpToDateCount := 0;
+  for I := 0 to High(Items) do
+    case Items[I].Action of
+      suaUpdated:
+        Inc(UpdatedCount);
+      suaUpToDate:
+        Inc(UpToDateCount);
+      else
+        raise ENikError.Create('Unexpected SDK update action.');
+    end;
+
+  if IsJson then
+  begin
+    Root := TJSONObject.Create;
+    Arr := TJSONArray.Create;
+    try
+      Root.Add('nikrunHome', GetNikrunHomeDir);
+      Root.Add('updatedCount', UpdatedCount);
+      Root.Add('upToDateCount', UpToDateCount);
+      for I := 0 to High(Items) do
+      begin
+        case Items[I].Action of
+          suaUpdated:
+            ActionStr := 'updated';
+          suaUpToDate:
+            ActionStr := 'up_to_date';
+          else
+            raise ENikError.Create('Unexpected SDK update action.');
+        end;
+
+        ItemObj := TJSONObject.Create;
+        ItemObj.Add('fpcVersion', Items[I].FpcVersion);
+        ItemObj.Add('targetOs', Items[I].TargetOs);
+        ItemObj.Add('targetCpu', Items[I].TargetCpu);
+        ItemObj.Add('targetTriplet', Items[I].TargetTriplet);
+        ItemObj.Add('action', ActionStr);
+        ItemObj.Add('previousSdkId', Items[I].PreviousSdkId);
+        if Trim(Items[I].PreviousCommit) <> '' then
+          ItemObj.Add('previousCommit', Items[I].PreviousCommit)
+        else
+          ItemObj.Add('previousCommit', TJSONNull.Create);
+        ItemObj.Add('currentSdkId', Items[I].CurrentSdkId);
+        if Trim(Items[I].CurrentCommit) <> '' then
+          ItemObj.Add('currentCommit', Items[I].CurrentCommit)
+        else
+          ItemObj.Add('currentCommit', TJSONNull.Create);
+        ItemObj.Add('installPath', Items[I].InstallPath);
+
+        RemArr := TJSONArray.Create;
+        for J := 0 to High(Items[I].RemovedPaths) do
+          RemArr.Add(Items[I].RemovedPaths[J]);
+        ItemObj.Add('removedPaths', RemArr);
+        Arr.Add(ItemObj);
+      end;
+      Root.Add('sdks', Arr);
+      WriteJson(Root);
+    finally
+      Root.Free;
+    end;
+    Exit(0);
+  end;
+
+  if Length(Items) = 0 then
+  begin
+    if Length(ListInstalledSdks) = 0 then
+    begin
+      WriteInfo('No Free Pascal SDKs installed in ' + GetNikrunSdksDir);
+      WriteLn('    Run ' + StyleBold('nik sdk install 3.2.2') + ' to install an SDK first.');
+    end
+    else
+      WriteInfo('No installed Free Pascal SDKs matched the specified filters.');
+  end;
+
   Result := 0;
 end;
 
@@ -660,6 +836,8 @@ begin
     Result := ExecuteSdkList(SubArgs)
   else if (SubCmd = 'install') or (SubCmd = 'i') or (SubCmd = 'add') then
     Result := ExecuteSdkInstall(SubArgs)
+  else if (SubCmd = 'update') or (SubCmd = 'upgrade') or (SubCmd = 'up') then
+    Result := ExecuteSdkUpdate(SubArgs)
   else if (SubCmd = 'uninstall') or (SubCmd = 'remove') or (SubCmd = 'rm') then
     Result := ExecuteSdkUninstall(SubArgs)
   else if (SubCmd = 'info') or (SubCmd = 'status') then
