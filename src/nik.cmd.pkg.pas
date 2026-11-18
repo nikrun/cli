@@ -181,7 +181,7 @@ begin
     Root.Add('success', False);
     Root.Add('exitCode', AExitCode);
     Root.Add('error', AMessage);
-    WriteLn(Root.FormatJSON([], 2));
+    WriteJson(Root);
   finally
     Root.Free;
   end;
@@ -203,7 +203,7 @@ begin
       Root.Add('lockPath', TJSONNull.Create);
     Root.Add('lockUpdated', ARes.LockUpdated);
     Root.Add('packages', BuildPackagesJsonArray(ARes.Packages));
-    WriteLn(Root.FormatJSON([], 2));
+    WriteJson(Root);
   finally
     Root.Free;
   end;
@@ -634,7 +634,7 @@ begin
         end;
       Root.Add('branches', BranchesArr);
 
-      WriteLn(Root.FormatJSON([], 2));
+      WriteJson(Root);
     finally
       Root.Free;
     end;

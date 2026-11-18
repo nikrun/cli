@@ -574,7 +574,7 @@ begin
   try
     Root.Add('success', False);
     Root.Add('error', AMsg);
-    WriteLn(Root.FormatJSON([], 2));
+    WriteJson(Root);
   finally
     Root.Free;
   end;
@@ -793,7 +793,7 @@ begin
         for I := 0 to High(CreatedFiles) do
           CreatedArr.Add(CreatedFiles[I]);
         Root.Add('createdFiles', CreatedArr);
-        WriteLn(Root.FormatJSON([], 2));
+        WriteJson(Root);
       finally
         Root.Free;
       end;

@@ -194,7 +194,7 @@ begin
         Arr.Add(ItemObj);
       end;
       Root.Add('sdks', Arr);
-      WriteLn(Root.FormatJSON([], 2));
+      WriteJson(Root);
     finally
       Root.Free;
     end;
@@ -300,7 +300,7 @@ begin
         Arr.Add(ItemObj);
       end;
       Root.Add('sdks', Arr);
-      WriteLn(Root.FormatJSON([], 2));
+      WriteJson(Root);
     finally
       Root.Free;
     end;
@@ -604,7 +604,7 @@ begin
         FileExists(FpcBin) and FileExists(FpcCfg) and
         DirectoryExists(UnitsDir) and DirectoryExists(RtlDir) and DirectoryExists(PkgDir));
 
-      WriteLn(Root.FormatJSON([], 2));
+      WriteJson(Root);
     finally
       Root.Free;
     end;

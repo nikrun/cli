@@ -5,7 +5,7 @@ unit nik.term;
 interface
 
 uses
-  SysUtils;
+  SysUtils, fpjson;
 
 procedure InitTerminal(AForceNoColor: Boolean = False);
 function IsInteractiveOutput: Boolean;
@@ -23,6 +23,8 @@ procedure WriteSuccess(const AMsg: string);
 procedure WriteInfo(const AMsg: string);
 procedure WriteWarn(const AMsg: string);
 procedure WriteError(const AMsg: string);
+function FormatJsonOutput(AData: TJSONData): string;
+procedure WriteJson(AData: TJSONData);
 procedure WriteProgress(const ALabel: string; ABytesRead, ATotalBytes: Int64);
 procedure FinishProgress;
 
@@ -181,6 +183,24 @@ procedure WriteError(const AMsg: string);
 begin
   FinishProgress;
   WriteLn(StdErr, StyleRed('error:') + ' ' + AMsg);
+end;
+
+function FormatJsonOutput(AData: TJSONData): string;
+begin
+  if AData = nil then
+    Exit('');
+  if GInteractiveOut then
+    Result := AData.FormatJSON([], 2)
+  else
+    Result := AData.FormatJSON(AsCompressedJSON, 0);
+end;
+
+procedure WriteJson(AData: TJSONData);
+begin
+  if AData = nil then
+    Exit;
+  FinishProgress;
+  WriteLn(FormatJsonOutput(AData));
 end;
 
 function FormatByteSize(ABytes: Int64): string;

@@ -396,7 +396,9 @@ try {
 
     # 7. Install 3.3.1 alongside 3.2.2
     $inst331 = Invoke-Nik -NikHome $TestHome -Arguments @('sdk', 'install', '3.3.1', '--index-url', $IndexUrl)
-    $listTwo = (Invoke-Nik -NikHome $TestHome -Arguments @('sdk', 'list', '--json')).Output | ConvertFrom-Json
+    $listTwoRaw = (Invoke-Nik -NikHome $TestHome -Arguments @('sdk', 'list', '--json')).Output
+    Assert-True ($listTwoRaw -notmatch "[\r\n\t]" -and $listTwoRaw -match '^\{"nikrunHome":"') 'Non-interactive --json output is emitted as compact single-line JSON without newlines or indentation'
+    $listTwo = $listTwoRaw | ConvertFrom-Json
     Assert-True ($listTwo.sdks.Count -eq 2 -and $null -eq $listTwo.PSObject.Properties['defaultSdkId'] -and $null -eq $listTwo.sdks[0].PSObject.Properties['default']) 'nik sdk list --json lists both installed SDKs cleanly without default properties'
 
     # 7b. Human table layout checks (VERSION TARGET PATH only)

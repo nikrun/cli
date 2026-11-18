@@ -209,7 +209,7 @@ begin
     end;
     Root.Add('diagnostics', DiagArr);
 
-    WriteLn(Root.FormatJSON([], 2));
+    WriteJson(Root);
   finally
     Root.Free;
   end;
@@ -225,7 +225,7 @@ begin
     Root.Add('exitCode', AExitCode);
     Root.Add('error', AErrorMsg);
     Root.Add('diagnostics', TJSONArray.Create);
-    WriteLn(Root.FormatJSON([], 2));
+    WriteJson(Root);
   finally
     Root.Free;
   end;
