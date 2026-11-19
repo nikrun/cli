@@ -15,12 +15,11 @@ package:
     unitPaths:
       - src
 
+  # Tests are the *.test.pas fpcunit units next to the units in src/ (discovered by 'nik test').
   test:
-    entry: tests/lsp_protocol_tests.pas
-    output: bin/lsp_protocol_tests
+    toolchain:
+      fpc: 3.3.1
     build:
-      unitPaths:
-        - tests
       assertions: true
       heaptrc: true
       checks:

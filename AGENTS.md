@@ -52,8 +52,10 @@ Run commands from the repository root (`pwsh` / Windows PowerShell):
 # Build optimized release binary & install into ~/.nikrun/bin
 .\build.ps1 -Profile release -Install -RunTests:$false
 
-# Run the `nik` core unit tests (tests/nik_unit_tests.pas, heaptrc leak check)
-.\test-units.ps1
+# Run the `nik` unit tests (fpcunit `*.test.pas` units next to the code, heaptrc leak check)
+.\bin\nik test
+.\bin\nik test --list --json
+.\bin\nik test nik.pkg.semver.test
 
 # Run the automated CLI & LSP end-to-end test suite directly
 .\test.ps1

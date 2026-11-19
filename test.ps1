@@ -771,6 +771,102 @@ program:
     Assert-True ($autoMockJson.sdkInstalled -eq $true -and $autoMockJson.error -match 'Entry source file not found') 'nik build --json reports sdkInstalled=true when SDK was provisioned before subsequent preflight error'
     Assert-True (Test-Path ([System.IO.Path]::Combine($AutoMockHome, 'sdks', $Mock322.SdkId, 'bin', $Mock322.TargetTriplet, 'fpc.cfg'))) 'Auto-installed mock SDK contains generated isolated fpc.cfg in ~/.nikrun/sdks'
 
+    # 13h. nik test: static discovery without a compiler (--list), naming conventions, JSON & error handling
+    $TestListDir = Join-Path $WorkDir 'test-list-proj'
+    $TestListSrc = Join-Path $TestListDir 'src'
+    $TestListVendor = [System.IO.Path]::Combine($TestListDir, 'vendor', 'x')
+    New-Item -ItemType Directory -Force -Path $TestListSrc, $TestListVendor | Out-Null
+    @'
+program:
+  name: test-list-app
+  entry: src/main.pas
+  toolchain:
+    fpc: 3.3.1
+  build:
+    unitPaths: [src]
+'@ | Set-Content -Path (Join-Path $TestListDir 'nik.yaml') -Encoding UTF8
+    'program main; begin end.' | Set-Content -Path (Join-Path $TestListSrc 'main.pas') -Encoding UTF8
+    'unit plain; interface implementation end.' | Set-Content -Path (Join-Path $TestListSrc 'plain.pas') -Encoding UTF8
+    @'
+unit foo_test;
+{$mode objfpc}{$H+}
+interface
+uses fpcunit, testregistry;
+type
+  TFoo = class(TTestCase)
+  published
+    procedure TestA;
+    procedure TestB;
+  end;
+implementation
+procedure TFoo.TestA; begin end;
+procedure TFoo.TestB; begin end;
+initialization
+  RegisterTest(TFoo);
+end.
+'@ | Set-Content -Path (Join-Path $TestListSrc 'foo_test.pas') -Encoding UTF8
+    @'
+unit bar.test;
+{$mode objfpc}{$H+}
+interface
+uses fpcunit, testregistry;
+type
+  TBar = class(TTestCase)
+  published
+    procedure TestC;
+  end;
+implementation
+procedure TBar.TestC; begin end;
+end.
+'@ | Set-Content -Path (Join-Path $TestListSrc 'bar.test.pas') -Encoding UTF8
+    @'
+unit y_test;
+interface
+implementation
+end.
+'@ | Set-Content -Path (Join-Path $TestListVendor 'y_test.pas') -Encoding UTF8
+
+    $testHelp = Invoke-Nik -NikHome $TestHome -Arguments @('test', '--help')
+    Assert-True ($testHelp.ExitCode -eq 0 -and $testHelp.Output -match '--json-stream' -and $testHelp.Output -match 'FILTER') 'nik test --help documents filters and --json-stream'
+    Assert-True ((Invoke-Nik -NikHome $TestHome -Arguments @('--help')).Output -match '(?m)^\s+test\s+Discover') 'nik --help lists the test command'
+
+    $listJson = (Invoke-Nik -NikHome $TestHome -Arguments @('test', '-m', $TestListDir, '--list', '--json')).Output | ConvertFrom-Json
+    $listIds = @($listJson.tests | ForEach-Object { $_.id })
+    Assert-True ($listJson.success -eq $true -and $listJson.mode -eq 'list' -and $listIds.Count -eq 3) 'nik test --list --json discovers both *_test.pas and *.test.pas units (3 tests)'
+    Assert-True (($listIds -contains 'foo_test.TFoo.TestA') -and ($listIds -contains 'bar.test.TBar.TestC')) 'nik test --list reports ids as <unit>.<Class>.<Method> including dotted unit names'
+    Assert-True (-not ($listIds | Where-Object { $_ -match '^y_test' })) 'nik test --list ignores test units outside the project unit paths'
+    $listA = $listJson.tests | Where-Object { $_.id -eq 'foo_test.TFoo.TestA' }
+    Assert-True ($listA.line -gt 0 -and $listA.file -match 'foo_test\.pas$') 'nik test --list reports the test method file and line'
+    Assert-True (@($listJson.warnings).Count -eq 1 -and $listJson.warnings[0].message -match 'RegisterTest') 'nik test --list warns when a test unit never calls RegisterTest'
+
+    $listFiltered = (Invoke-Nik -NikHome $TestHome -Arguments @('test', '-m', $TestListDir, '--list', '--json', 'foo_test')).Output | ConvertFrom-Json
+    Assert-True (@($listFiltered.tests).Count -eq 2) 'nik test --list <filter> selects tests by unit prefix'
+    $listGlob = (Invoke-Nik -NikHome $TestHome -Arguments @('test', '-m', $TestListDir, '--list', '--json', '*.TestC')).Output | ConvertFrom-Json
+    Assert-True (@($listGlob.tests).Count -eq 1 -and $listGlob.tests[0].method -eq 'TestC') 'nik test --list supports * wildcards in filters'
+
+    $noMatch = Invoke-Nik -NikHome $TestHome -Arguments @('test', '-m', $TestListDir, 'nothing.here') -AllowFailure
+    Assert-True ($noMatch.ExitCode -eq 2 -and $noMatch.Output -match 'No tests match') 'nik test exits with 2 when no test matches the filter'
+    $badOpt = Invoke-Nik -NikHome $TestHome -Arguments @('test', '--bogus') -AllowFailure
+    Assert-True ($badOpt.ExitCode -eq 2 -and $badOpt.Output -match "Unknown option '--bogus'") 'nik test rejects unknown options with exit code 2'
+    $bothJson = Invoke-Nik -NikHome $TestHome -Arguments @('test', '--json', '--json-stream') -AllowFailure
+    Assert-True ($bothJson.ExitCode -eq 2) 'nik test rejects --json combined with --json-stream'
+
+    # Removed test.entry / test.output are rejected with a migration hint
+    $OldEntryDir = Join-Path $WorkDir 'test-old-entry-proj'
+    New-Item -ItemType Directory -Force -Path $OldEntryDir | Out-Null
+    @'
+program:
+  name: old-entry
+  entry: main.pas
+  toolchain:
+    fpc: 3.3.1
+  test:
+    entry: tests/all.pas
+'@ | Set-Content -Path (Join-Path $OldEntryDir 'nik.yaml') -Encoding UTF8
+    $oldEntryRes = Invoke-NikSplitStreams -NikHome $TestHome -Arguments @('test', '-m', $OldEntryDir, '--json') -AllowFailure
+    $oldEntryJson = $oldEntryRes.StdOut.Trim() | ConvertFrom-Json
+    Assert-True ($oldEntryRes.ExitCode -ne 0 -and $oldEntryJson.success -eq $false -and $oldEntryJson.error -match 'no longer supported' -and [string]::IsNullOrWhiteSpace($oldEntryRes.StdErr)) 'nik test --json reports a removed test.entry as a JSON error with empty stderr'
+
     # 14. End-to-end real FPC SDK archive install + nik build tests (if dist/, .work/sdk-cache/, or -RealSdkZipPath exists)
     if (-not $SkipRealArchive) {
         $RealZip = if (-not [string]::IsNullOrWhiteSpace($RealSdkZipPath) -and (Test-Path $RealSdkZipPath)) {
@@ -1103,12 +1199,181 @@ end.
             Assert-True ($brokenJson.success -eq $false -and $brokenJson.exitCode -eq 1 -and $brokenJson.counts.errors -ge 1) 'nik build --json reports normalized exitCode 1 and error count on failed compile'
             $errDiag = @($brokenJson.diagnostics | Where-Object { $_.severity -eq 'error' })[0]
             Assert-True ($errDiag.line -eq 3 -and $errDiag.code -eq 5000 -and $errDiag.message -match 'DoesNotExist') 'nik build --json extracts exact file, line, column, code (5000), and message'
+
+            # 14g. nik test end-to-end: generated fpcunit runner, failures with file/line, filters, JSON stream, leaks, crashes
+            function New-NikTestFixture {
+                param([string]$Name, [string]$UnitName, [string]$UnitSource)
+                $dir = Join-Path $WorkDir $Name
+                $src = Join-Path $dir 'src'
+                New-Item -ItemType Directory -Force -Path $src | Out-Null
+                @"
+package:
+  name: $Name
+  build:
+    unitPaths: [src]
+  test:
+    toolchain:
+      fpc: $($realInfo.fpcVersion)
+"@ | Set-Content -Path (Join-Path $dir 'nik.yaml') -Encoding UTF8
+                $UnitSource | Set-Content -Path (Join-Path $src "$UnitName.pas") -Encoding UTF8
+                return $dir
+            }
+
+            $MixedDir = New-NikTestFixture -Name 'nik-test-mixed' -UnitName 'mixed_test' -UnitSource @'
+unit mixed_test;
+{$mode objfpc}{$H+}
+interface
+uses SysUtils, fpcunit, testregistry;
+type
+  TMixed = class(TTestCase)
+  published
+    procedure TestPass;
+    procedure TestFail;
+    procedure TestError;
+    procedure TestIgnored;
+    procedure TestOutput;
+  end;
+implementation
+procedure TMixed.TestPass;
+begin
+  AssertEquals(2, 1 + 1);
+end;
+procedure TMixed.TestFail;
+begin
+  AssertEquals('values differ', 1, 2);
+end;
+procedure TMixed.TestError;
+begin
+  raise Exception.Create('boom');
+end;
+procedure TMixed.TestIgnored;
+begin
+  Ignore('not ready');
+end;
+procedure TMixed.TestOutput;
+begin
+  WriteLn('hello from test');
+end;
+initialization
+  RegisterTest(TMixed);
+end.
+'@
+
+            $mixedRaw = Invoke-NikSplitStreams -NikHome $TestHome -Arguments @('test', '-m', $MixedDir, '--json') -AllowFailure
+            Assert-True ($mixedRaw.ExitCode -eq 1 -and [string]::IsNullOrWhiteSpace($mixedRaw.StdErr) -and $mixedRaw.StdOut.Trim() -notmatch "[\r\n]") 'nik test --json exits 1 on failing tests and emits single-line JSON with empty stderr'
+            $mixed = $mixedRaw.StdOut.Trim() | ConvertFrom-Json
+            Assert-True ($mixed.success -eq $false -and $mixed.build.success -eq $true -and $mixed.summary.total -eq 5 -and $mixed.summary.passed -eq 2 -and $mixed.summary.failed -eq 1 -and $mixed.summary.errors -eq 1 -and $mixed.summary.ignored -eq 1) 'nik test --json summarizes passed, failed, error and ignored tests'
+            $mFail = $mixed.tests | Where-Object { $_.method -eq 'TestFail' }
+            $mErr = $mixed.tests | Where-Object { $_.method -eq 'TestError' }
+            $mOut = $mixed.tests | Where-Object { $_.method -eq 'TestOutput' }
+            $mIgn = $mixed.tests | Where-Object { $_.method -eq 'TestIgnored' }
+            Assert-True ($mFail.status -eq 'failed' -and $mFail.failure.message -match 'values differ' -and $mFail.failure.file -match 'mixed_test\.pas$' -and $mFail.failure.line -gt 0) 'nik test --json reports the failing assertion message, file and line'
+            Assert-True ($mErr.status -eq 'error' -and $mErr.failure.message -eq 'boom') 'nik test --json reports unexpected exceptions as errors'
+            Assert-True ($mIgn.status -eq 'ignored' -and $mOut.status -eq 'passed' -and $mOut.output -match 'hello from test') 'nik test --json marks ignored tests and attributes stdout to the running test'
+            Assert-True ($mixed.leaks.unfreedBlocks -eq 0) 'nik test --json reports zero unfreed blocks when the runner is leak free'
+
+            $mixedHuman = Invoke-Nik -NikHome $TestHome -Arguments @('test', '-m', $MixedDir) -AllowFailure
+            Assert-True ($mixedHuman.ExitCode -eq 1 -and $mixedHuman.Output -match 'FAIL mixed_test\.TMixed\.TestFail' -and $mixedHuman.Output -match '2 of 5 test\(s\) failed') 'nik test prints failing tests with their location and a failure summary'
+
+            $filtered = (Invoke-Nik -NikHome $TestHome -Arguments @('test', '-m', $MixedDir, '--json', 'mixed_test.TMixed.TestPass', '*TestOutput')).Output | ConvertFrom-Json
+            Assert-True ($filtered.success -eq $true -and $filtered.summary.total -eq 2 -and $filtered.summary.passed -eq 2) 'nik test <filter...> runs only the selected tests'
+
+            $streamRaw = Invoke-NikSplitStreams -NikHome $TestHome -Arguments @('test', '-m', $MixedDir, '--json-stream') -AllowFailure
+            $streamEvents = @($streamRaw.StdOut -split "`r?`n" | Where-Object { $_.Trim() -ne '' } | ForEach-Object { $_ | ConvertFrom-Json })
+            Assert-True ($streamRaw.ExitCode -eq 1 -and $streamEvents[0].event -eq 'build' -and $streamEvents[0].success -eq $true -and $streamEvents[-1].event -eq 'summary' -and $streamEvents[-1].success -eq $false) 'nik test --json-stream emits build first and summary last as NDJSON'
+            $failEvent = $streamEvents | Where-Object { $_.event -eq 'fail' -and $_.id -eq 'mixed_test.TMixed.TestFail' } | Select-Object -First 1
+            Assert-True ($null -ne $failEvent -and $failEvent.kind -eq 'failure' -and $failEvent.line -gt 0 -and (@($streamEvents | Where-Object { $_.event -eq 'start' }).Count -eq 5)) 'nik test --json-stream emits start and fail events with file and line'
+
+            # Runner sources are only rewritten when they change (keeps compiled unit timestamps)
+            $RunnerSrc = [System.IO.Path]::Combine($MixedDir, '.nik', 'cache', 'test-runner-debug', 'nik_test_runner.pas')
+            $runnerStamp1 = (Get-Item $RunnerSrc).LastWriteTimeUtc
+            Start-Sleep -Milliseconds 1100
+            $null = Invoke-Nik -NikHome $TestHome -Arguments @('test', '-m', $MixedDir, '--json') -AllowFailure
+            Assert-True ((Get-Item $RunnerSrc).LastWriteTimeUtc -eq $runnerStamp1) 'nik test keeps the generated runner untouched when the set of test units is unchanged'
+
+            $noRun = (Invoke-Nik -NikHome $TestHome -Arguments @('test', '-m', $MixedDir, '--no-run', '--json')).Output | ConvertFrom-Json
+            Assert-True ($noRun.success -eq $true -and $noRun.build.success -eq $true) 'nik test --no-run compiles the runner without executing tests'
+
+            $LeakDir = New-NikTestFixture -Name 'nik-test-leak' -UnitName 'leak_test' -UnitSource @'
+unit leak_test;
+{$mode objfpc}{$H+}
+interface
+uses fpcunit, testregistry;
+type
+  TLeak = class(TTestCase)
+  published
+    procedure TestLeaks;
+  end;
+implementation
+procedure TLeak.TestLeaks;
+var
+  O: TObject;
+begin
+  O := TObject.Create;
+  AssertTrue(O <> nil);
+end;
+initialization
+  RegisterTest(TLeak);
+end.
+'@
+            $leak = (Invoke-NikSplitStreams -NikHome $TestHome -Arguments @('test', '-m', $LeakDir, '--json') -AllowFailure).StdOut.Trim() | ConvertFrom-Json
+            Assert-True ($leak.success -eq $false -and $leak.exitCode -eq 1 -and $leak.summary.passed -eq 1 -and $leak.leaks.unfreedBlocks -ge 1) 'nik test fails the run and reports unfreed blocks when a test leaks memory'
+
+            $CrashDir = New-NikTestFixture -Name 'nik-test-crash' -UnitName 'crash_test' -UnitSource @'
+unit crash_test;
+{$mode objfpc}{$H+}
+interface
+uses fpcunit, testregistry;
+type
+  TCrash = class(TTestCase)
+  published
+    procedure TestBefore;
+    procedure TestHalts;
+  end;
+implementation
+procedure TCrash.TestBefore;
+begin
+  AssertTrue(True);
+end;
+procedure TCrash.TestHalts;
+begin
+  Halt(3);
+end;
+initialization
+  RegisterTest(TCrash);
+end.
+'@
+            $crash = (Invoke-NikSplitStreams -NikHome $TestHome -Arguments @('test', '-m', $CrashDir, '--json') -AllowFailure).StdOut.Trim() | ConvertFrom-Json
+            $crashItem = $crash.tests | Where-Object { $_.method -eq 'TestHalts' }
+            Assert-True ($crash.success -eq $false -and $crashItem.status -eq 'error' -and $crashItem.failure.message -match 'terminated unexpectedly') 'nik test reports a test that terminates the runner as an error'
+
+            $BrokenTestDir = New-NikTestFixture -Name 'nik-test-broken' -UnitName 'broken_test' -UnitSource @'
+unit broken_test;
+{$mode objfpc}{$H+}
+interface
+uses fpcunit, testregistry;
+type
+  TBroken = class(TTestCase)
+  published
+    procedure TestX;
+  end;
+implementation
+procedure TBroken.TestX;
+begin
+  DoesNotExist := 1;
+end;
+initialization
+  RegisterTest(TBroken);
+end.
+'@
+            $brokenTest = (Invoke-NikSplitStreams -NikHome $TestHome -Arguments @('test', '-m', $BrokenTestDir, '--json') -AllowFailure).StdOut.Trim() | ConvertFrom-Json
+            Assert-True ($brokenTest.success -eq $false -and $brokenTest.build.success -eq $false -and @($brokenTest.build.diagnostics | Where-Object { $_.message -match 'DoesNotExist' }).Count -ge 1 -and @($brokenTest.tests).Count -eq 0) 'nik test --json reports compiler diagnostics when the test runner does not compile'
         }
     }
 
     # 15. Standalone nikrun-lsp-protocol unit suite + End-to-End 'nik lsp' session over binary stdio
     Write-Host "`n==> Running standalone nikrun-lsp-protocol unit tests..." -ForegroundColor Cyan
-    & ([System.IO.Path]::Combine($RepoRoot, 'lsp-protocol', 'test.ps1'))
+    & ([System.IO.Path]::Combine($RepoRoot, 'lsp-protocol', 'test.ps1')) -NikBinaryPath $NikExe
 
     Write-Host "`n==> Running 'nik lsp' Language Server end-to-end tests..." -ForegroundColor Cyan
     $lspHelp = Invoke-Nik -NikHome $TestHome -Arguments @('lsp', '--help')

@@ -379,12 +379,12 @@ if (-not $ManifestOnly) {
 
     if ($RunTests) {
         Write-Host "  -> Running nikrun-lsp-protocol unit tests..."
-        & (Join-Path $RootDir "lsp-protocol/test.ps1") -SdkPath $Toolchain.SdkRoot -NikrunHome $EffectiveNikHome | Out-Host
+        & (Join-Path $RootDir "lsp-protocol/test.ps1") -NikBinaryPath $BuiltExe -NikrunHome $EffectiveNikHome | Out-Host
         if ($LASTEXITCODE -ne 0 -and $null -ne $LASTEXITCODE) { throw "lsp-protocol unit tests failed" }
 
-        Write-Host "  -> Running nik CLI unit tests..."
-        & (Join-Path $RootDir "test-units.ps1") -SdkPath $Toolchain.SdkRoot -NikrunHome $EffectiveNikHome | Out-Host
-        if ($LASTEXITCODE -ne 0 -and $null -ne $LASTEXITCODE) { throw "nik CLI unit tests failed" }
+        Write-Host "  -> Running nik unit tests (nik test)..."
+        & $BuiltExe --no-color --nikrun-home $EffectiveNikHome test -m $RootDir | Out-Host
+        if ($LASTEXITCODE -ne 0 -and $null -ne $LASTEXITCODE) { throw "nik unit tests failed" }
 
         Write-Host "  -> Running nik CLI & LSP integration tests..."
         & (Join-Path $RootDir "test.ps1") -SkipBuild -NikBinaryPath $BuiltExe | Out-Host
