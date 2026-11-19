@@ -1006,7 +1006,10 @@ begin
     Exit(Integer(Remain));
   end;
 
-  if Length(FPendingQueue) > 0 then
+  // Queued checks cannot start before the workspace is configured. Reporting them as ready
+  // work would make the server loop poll its input with a zero timeout and burn a full CPU
+  // core until shutdown; they run after a later configuration change makes the workspace ready.
+  if FWorkspaceReady and (Length(FPendingQueue) > 0) then
     Exit(0);
 
   if FSdkIndexRefreshProc <> nil then

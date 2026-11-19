@@ -9,6 +9,7 @@ changelog:
         - 'Reject YAML anchors, aliases and tags in `nik.yaml` with a clear error (quote the value to use it literally) and accept only plain decimal integers for numeric fields'
       deprecated: []
       fixed:
+        - 'Stop `nik lsp` from burning a full CPU core when queued re-checks cannot start because the workspace has no usable `nik.yaml` or SDK'
         - 'Parse apostrophes and double quotes inside unquoted `nik.yaml` values (for example `description: Don''t panic`) and write `nik.lock` entries with quotes, indicators or `null` so the file always reads back'
         - 'Accept blank and comment-only lines that contain tabs in `nik.yaml`, and bound the nesting depth of flow collections instead of overflowing the stack'
       removed: []

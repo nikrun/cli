@@ -1249,11 +1249,15 @@ end.
             $stderrTask.Wait(5000) | Out-Null
             $stderrText = $stderrTask.Result
 
+            $cpuSeconds = -1.0
+            try { $cpuSeconds = $proc.TotalProcessorTime.TotalSeconds } catch { }
+
             return [PSCustomObject]@{
-                Exited   = $exited
-                ExitCode = $proc.ExitCode
-                Frames   = $parsedFrames.ToArray()
-                Stderr   = $stderrText
+                Exited     = $exited
+                ExitCode   = $proc.ExitCode
+                Frames     = $parsedFrames.ToArray()
+                Stderr     = $stderrText
+                CpuSeconds = $cpuSeconds
             }
         }
 
@@ -1447,6 +1451,25 @@ end.
         Assert-True ($null -ne $ymlDiagNotif -and $ymlDiagNotif.params.diagnostics[0].source -eq 'nik.yaml' -and $ymlDiagNotif.params.diagnostics[0].message -match "use 'program'") 'nik lsp publishes helpful error diagnostic directly onto broken nik.yaml'
         $fallbackSymResp = @($sess3.Frames | Where-Object { $_.PSObject.Properties['id'] -and $_.id -eq 31 })[0]
         Assert-True ($null -ne $fallbackSymResp -and $fallbackSymResp.result[0].name -eq 'LegacyAnswer') 'nik lsp still provides Pascal symbol intelligence via fallback SDK when nik.yaml is broken'
+
+        # Session 3a: queued re-checks must not spin the server loop while the workspace is not ready.
+        # Changing an .inc file queues every open Pascal document; without a usable nik.yaml none of them can start.
+        $LspIncFile = Join-Path $LspBadYmlSrc 'Shared.inc'
+        'const SharedValue = 1;' | Set-Content -Path $LspIncFile -Encoding UTF8
+        $incUri  = ConvertTo-FileUri $LspIncFile
+        $incText = [System.IO.File]::ReadAllText($LspIncFile)
+        $sess3a = Invoke-LspSession -NikHomeDir $CandidateLspHome -ProjectPath $LspBadYmlDir -LogPath '' -Messages @(
+            @{ jsonrpc = '2.0'; id = 35; method = 'initialize'; params = @{ processId = $PID; rootUri = $badRootUri } },
+            @{ jsonrpc = '2.0'; method = 'initialized'; params = @{} },
+            @{ jsonrpc = '2.0'; method = 'textDocument/didOpen'; params = @{ textDocument = @{ uri = $incUri; languageId = 'objectpascal'; version = 1; text = $incText } } },
+            @{ jsonrpc = '2.0'; method = 'textDocument/didOpen'; params = @{ textDocument = @{ uri = $legacyUri; languageId = 'objectpascal'; version = 1; text = $legacyText } } },
+            @{ jsonrpc = '2.0'; method = 'textDocument/didChange'; params = @{ textDocument = @{ uri = $incUri; version = 2 }; contentChanges = @(@{ text = 'const SharedValue = 2;' }) } },
+            @{ __sleepMs = 3000 },
+            @{ jsonrpc = '2.0'; id = 36; method = 'shutdown' },
+            @{ jsonrpc = '2.0'; method = 'exit' }
+        )
+        Assert-True ($sess3a.Exited -and $sess3a.ExitCode -eq 0) 'nik lsp exits cleanly after queued re-checks with an unusable workspace'
+        Assert-True (($sess3a.CpuSeconds -ge 0) -and ($sess3a.CpuSeconds -lt 1.5)) "nik lsp idles instead of spinning while queued checks cannot start (CPU $([math]::Round($sess3a.CpuSeconds, 2)) s over a 3 s idle window)"
 
         # Session 3b: nik lsp must NEVER auto-download a missing SDK silently in the background (even when NIKRUN_SDK_INDEX_URL is valid)
         $LspNoAutoHome = Join-Path $WorkDir 'nikrun-lsp-no-auto-home'
