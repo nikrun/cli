@@ -6,7 +6,7 @@ program nik_unit_tests;
   which compiles this program with heaptrc and fails on any unfreed memory block. }
 
 uses
-  SysUtils, Classes, Process,
+  SysUtils, Classes, Process, Contnrs, Zipper, zstream, libtar,
   {$IFDEF UNIX}BaseUnix,{$ENDIF}
   nik.types,
   nik.fs,
@@ -18,6 +18,7 @@ uses
   nik.sdk.config,
   nik.manifest.types,
   nik.manifest.io,
+  nik.archive,
   nik.cmd.init;
 
 type
@@ -732,6 +733,149 @@ begin
   end;
 end;
 
+{ ---- nik.archive: extraction and traversal protection ---- }
+
+var
+  GArchivePath, GArchiveDest: string;
+
+procedure DoExtractPackage;
+begin
+  ExtractPackageArchive(GArchivePath, GArchiveDest, True);
+end;
+
+procedure BuildTarGz(const AArchivePath: string; const ANames, AContents: array of string);
+var
+  TarMem: TMemoryStream;
+  Writer: TTarWriter;
+  Gz: TGZFileStream;
+  I: Integer;
+begin
+  TarMem := TMemoryStream.Create;
+  try
+    Writer := TTarWriter.Create(TarMem);
+    try
+      for I := Low(ANames) to High(ANames) do
+        Writer.AddString(AContents[I], ANames[I], Now);
+    finally
+      Writer.Free;
+    end;
+    Gz := TGZFileStream.Create(AArchivePath, gzOpenWrite);
+    try
+      if TarMem.Size > 0 then
+        Gz.WriteBuffer(TarMem.Memory^, TarMem.Size);
+    finally
+      Gz.Free;
+    end;
+  finally
+    TarMem.Free;
+  end;
+end;
+
+procedure BuildZip(const AArchivePath: string; const ANames, AContents: array of string);
+var
+  Zip: TZipper;
+  Streams: TObjectList;
+  S: TStringStream;
+  I: Integer;
+begin
+  Streams := TObjectList.Create(True);
+  Zip := TZipper.Create;
+  try
+    Zip.FileName := AArchivePath;
+    for I := Low(ANames) to High(ANames) do
+    begin
+      S := TStringStream.Create(AContents[I]);
+      Streams.Add(S);
+      Zip.Entries.AddFileEntry(S, ANames[I]);
+    end;
+    Zip.ZipAllFiles;
+  finally
+    Zip.Free;
+    Streams.Free;
+  end;
+end;
+
+procedure CheckPackageExtracts(const AArchivePath, ADest: string; const AContext: string);
+begin
+  GArchivePath := AArchivePath;
+  GArchiveDest := ADest;
+  DoExtractPackage;
+  Check(FileExists(JoinPath(ADest, 'a.txt')), AContext + ': file at the archive root after unwrapping');
+  CheckEqStr(ReadFileTextUtf8(JoinPath(ADest, 'a.txt')), 'alpha', AContext + ': file content');
+  CheckEqStr(ReadFileTextUtf8(JoinPath(JoinPath(ADest, 'sub'), 'b.txt')), 'beta', AContext + ': nested file content');
+  Check(not DirectoryExists(JoinPath(ADest, 'pkg-1.0')), AContext + ': single wrapper directory is gone');
+end;
+
+procedure TestTarGzExtraction;
+var
+  Dir, Archive, Dest: string;
+begin
+  Dir := NewTempTestDir('nik-unit-targz');
+  try
+    Archive := JoinPath(Dir, 'pkg.tar.gz');
+    Dest := JoinPath(Dir, 'out');
+    BuildTarGz(Archive, ['pkg-1.0/a.txt', 'pkg-1.0/sub/b.txt'], ['alpha', 'beta']);
+    CheckPackageExtracts(Archive, Dest, 'tar.gz');
+    Check(CountDirectoryEntries(Dest) = 2, 'tar.gz: nothing but the two extracted entries');
+  finally
+    DeleteDirectoryRecursive(Dir);
+  end;
+end;
+
+procedure TestTarGzRejectsTraversal;
+var
+  Dir: string;
+begin
+  Dir := NewTempTestDir('nik-unit-targz-evil');
+  try
+    GArchivePath := JoinPath(Dir, 'evil.tar.gz');
+    GArchiveDest := JoinPath(Dir, 'out');
+    BuildTarGz(GArchivePath, ['pkg/ok.txt', '../evil.txt'], ['fine', 'owned']);
+    CheckEnikError('Unsafe tar archive entry', 'tar.gz with a parent-directory entry', @DoExtractPackage);
+    Check(not FileExists(JoinPath(Dir, 'evil.txt')), 'nothing was written outside the destination');
+  finally
+    DeleteDirectoryRecursive(Dir);
+  end;
+end;
+
+procedure TestZipExtraction;
+var
+  Dir, Archive, Dest: string;
+begin
+  Dir := NewTempTestDir('nik-unit-zip');
+  try
+    Archive := JoinPath(Dir, 'pkg.zip');
+    Dest := JoinPath(Dir, 'out');
+    BuildZip(Archive, ['pkg-1.0/a.txt', 'pkg-1.0/sub/b.txt'], ['alpha', 'beta']);
+    CheckPackageExtracts(Archive, Dest, 'zip');
+  finally
+    DeleteDirectoryRecursive(Dir);
+  end;
+end;
+
+procedure TestZipRejectsTraversal;
+var
+  Dir: string;
+begin
+  Dir := NewTempTestDir('nik-unit-zip-evil');
+  try
+    GArchivePath := JoinPath(Dir, 'evil.zip');
+    GArchiveDest := JoinPath(Dir, 'out');
+    BuildZip(GArchivePath, ['pkg/ok.txt', '../evil.txt'], ['fine', 'owned']);
+    CheckEnikError('Unsafe archive entry', 'zip with a parent-directory entry', @DoExtractPackage);
+    Check(not FileExists(JoinPath(Dir, 'evil.txt')), 'zip: nothing was written outside the destination');
+  finally
+    DeleteDirectoryRecursive(Dir);
+  end;
+end;
+
+procedure TestUnsupportedArchiveFormat;
+begin
+  GArchivePath := 'package.rar';
+  GArchiveDest := IncludeTrailingPathDelimiter(GetTempDir(False)) + 'nik-unit-never';
+  CheckEnikError('Unsupported package archive format', 'unknown archive extension', @DoExtractPackage);
+end;
+
 { ---- runner ---- }
 
 procedure RunTest(const AName: string; AProc: TTestProc);
@@ -759,6 +903,11 @@ begin
     RunTest('fs: writes replace files atomically', @TestWriteFileReplacesAtomically);
     RunTest('fs: permanent move failures are immediate', @TestMoveDirectoryFailsFastOnPermanentErrors);
     RunTest('fs: deleting a tree never follows directory links', @TestDeleteDoesNotFollowDirectoryLinks);
+    RunTest('archive: tar.gz extraction', @TestTarGzExtraction);
+    RunTest('archive: tar.gz traversal is rejected', @TestTarGzRejectsTraversal);
+    RunTest('archive: zip extraction', @TestZipExtraction);
+    RunTest('archive: zip traversal is rejected', @TestZipRejectsTraversal);
+    RunTest('archive: unsupported formats are rejected', @TestUnsupportedArchiveFormat);
     RunTest('paths: safe segments and relative paths', @TestSafePathHelpers);
     RunTest('sdk: index rejects unsafe names', @TestSdkIndexRejectsUnsafeNames);
     RunTest('sdk: remote entries need a checksum', @TestRemoteEntryNeedsChecksum);

@@ -9,6 +9,7 @@ changelog:
         - 'Reject YAML anchors, aliases and tags in `nik.yaml` with a clear error (quote the value to use it literally) and accept only plain decimal integers for numeric fields'
       deprecated: []
       fixed:
+        - 'Stop zip extraction through `tar`/`unzip` from hanging on tools that print many warnings (their output is drained now), and prefer the system `tar.exe` over a `tar.exe` found earlier in `PATH` on Windows'
         - 'Report argument errors, unknown commands and unexpected exceptions as a JSON object on stdout (empty stderr) when `--json` is given, instead of plain text on stderr'
         - 'Write `nik.lock`, config and manifest files by renaming a finished temporary file over the target, so an interrupted run or a concurrent reader never sees a truncated file'
         - 'Report a permanent directory-move failure at once with the operating-system reason instead of retrying 25 times, and remove Windows junctions and directory symlinks inside a deleted tree as links instead of failing on them'
@@ -20,6 +21,7 @@ changelog:
         - 'Accept blank and comment-only lines that contain tabs in `nik.yaml`, and bound the nesting depth of flow collections instead of overflowing the stack'
       removed: []
       security:
+        - 'Unpack `.tar.gz` packages through a temporary file instead of memory and refuse archives that unpack to more than 2 GiB, so a small gzip bomb can no longer exhaust RAM'
         - 'Refuse to install a remote SDK whose index entry has no `sha256` unless `--skip-verify` is passed, instead of installing it unverified'
         - 'Require a 40-digit hexadecimal `rev` for Git entries in `nik.lock` and validate every commit before it reaches `git` or a cache path, closing option injection (`--upload-pack=…`) and path traversal through a crafted lock file'
         - 'Reject SDK ids, archive file names and manifest paths that could leave `~/.nikrun` (`..`, separators, drive letters) when reading `index.json` and `sdk-manifest.json`'

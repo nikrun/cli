@@ -101,6 +101,7 @@ function TryRunExtractor(const AExe: string; const AArgs: array of string): Bool
 var
   Proc: TProcess;
   I: Integer;
+  DrainBuf: array[0..4095] of Byte;
 begin
   Result := False;
   if (AExe = '') or (not FileExists(AExe)) then
@@ -111,9 +112,19 @@ begin
     Proc.Executable := AExe;
     for I := Low(AArgs) to High(AArgs) do
       Proc.Parameters.Add(AArgs[I]);
-    Proc.Options := [poWaitOnExit, poNoConsole, poUsePipes];
+    // Merge stderr into stdout and drain it: with unread pipes a tool that prints many warnings
+    // (tar.exe on many entries) fills the pipe buffer and blocks forever.
+    Proc.Options := [poNoConsole, poUsePipes, poStderrToOutPut];
     try
       Proc.Execute;
+      while Proc.Running or (Proc.Output.NumBytesAvailable > 0) do
+      begin
+        if Proc.Output.NumBytesAvailable > 0 then
+          Proc.Output.Read(DrainBuf[0], SizeOf(DrainBuf))
+        else
+          Sleep(10);
+      end;
+      Proc.WaitOnExit;
       Result := (Proc.ExitStatus = 0);
     except
       Result := False;
@@ -160,32 +171,54 @@ begin
   end;
 end;
 
+const
+  // A package archive that unpacks to more than this is treated as a decompression bomb.
+  MAX_UNPACKED_TAR_BYTES: Int64 = 2147483648; // 2 GiB
+
 procedure ExtractTarGzViaFcl(const ATarGzPath, ADestDir: string);
 var
   GzStream: TGZFileStream;
-  MemTar: TMemoryStream;
+  TarFile: TFileStream;
+  TarPath: string;
   TarArch: TTarArchive;
   DirRec: TTarDirRec;
   CleanRel, OutPath: string;
   OutFile: TFileStream;
   Buf: array[0..65535] of Byte;
   ReadCount: LongInt;
+  Total: Int64;
 begin
-  MemTar := TMemoryStream.Create;
+  // The tar reader needs a seekable stream, which the gzip stream is not. Unpack to a temporary
+  // file rather than into memory, so a large archive costs disk space instead of RAM.
+  TarPath := Format('%s%s.%d.tar.tmp', [IncludeTrailingPathDelimiter(GetTempDir(False)),
+    ChangeFileExt(ExtractFileName(ATarGzPath), ''), GetProcessID]);
+  TarFile := nil;
   try
     GzStream := TGZFileStream.Create(ATarGzPath, gzOpenRead);
     try
-      repeat
-        ReadCount := GzStream.Read(Buf[0], SizeOf(Buf));
-        if ReadCount > 0 then
-          MemTar.WriteBuffer(Buf[0], ReadCount);
-      until ReadCount = 0;
+      TarFile := TFileStream.Create(TarPath, fmCreate);
+      try
+        Total := 0;
+        repeat
+          ReadCount := GzStream.Read(Buf[0], SizeOf(Buf));
+          if ReadCount > 0 then
+          begin
+            Inc(Total, ReadCount);
+            if Total > MAX_UNPACKED_TAR_BYTES then
+              raise ENikError.CreateFmt('Archive %s unpacks to more than %d bytes; refusing to extract it.',
+                [ATarGzPath, MAX_UNPACKED_TAR_BYTES]);
+            TarFile.WriteBuffer(Buf[0], ReadCount);
+          end;
+        until ReadCount = 0;
+      finally
+        FreeAndNil(TarFile);
+      end;
     finally
       GzStream.Free;
     end;
 
-    MemTar.Position := 0;
-    TarArch := TTarArchive.Create(MemTar);
+    TarFile := TFileStream.Create(TarPath, fmOpenRead or fmShareDenyWrite);
+    TarArch := TTarArchive.Create(TarFile);
     try
       TarArch.Reset;
       while TarArch.FindNext(DirRec) do
@@ -221,7 +254,9 @@ begin
       TarArch.Free;
     end;
   finally
-    MemTar.Free;
+    TarFile.Free;
+    if FileExists(TarPath) then
+      SysUtils.DeleteFile(TarPath);
   end;
 end;
 
@@ -236,9 +271,13 @@ begin
   EnsureDirExists(ADestDir);
 
 {$IFDEF WINDOWS}
-  ToolBin := FindExecutableInPath('tar.exe');
-  if (ToolBin = '') and FileExists('C:\Windows\System32\tar.exe') then
-    ToolBin := 'C:\Windows\System32\tar.exe';
+  // The bsdtar shipped with Windows reads zip files. A tar.exe earlier in PATH (Git for Windows
+  // ships GNU tar) neither does nor is trustworthy, so the system copy goes first.
+  ToolBin := '';
+  if SysUtils.GetEnvironmentVariable('SystemRoot') <> '' then
+    ToolBin := JoinPath(JoinPath(SysUtils.GetEnvironmentVariable('SystemRoot'), 'System32'), 'tar.exe');
+  if (ToolBin = '') or (not FileExists(ToolBin)) then
+    ToolBin := FindExecutableInPath('tar.exe');
 
   if (ToolBin <> '') and TryRunExtractor(ToolBin, ['-xf', AZipPath, '-C', ADestDir]) then
     Exit;
