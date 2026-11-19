@@ -34,7 +34,7 @@ This repository contains the **`nik` CLI** (`src/nik.*.pas`) and the standalone,
 
 ### How Nikrun Compares
 
-| Aspect | Official `freepascal.org` Installers | `fpcupdeluxe` | **Nikrun** |
+| Aspect | Official freepascal.org Installers | fpcupdeluxe | Nikrun |
 | :--- | :--- | :--- | :--- |
 | **Setup & System Impact** | Global OS installers (admin/root required, global `/etc/fpc.cfg` & `PATH`) | GUI/CLI builder that compiles FPC & Lazarus locally from source | **100% user scope (`~/.nikrun`)**, zero admin rights, prebuilt portable SDKs |
 | **Versions & Nightly Trunk** | Infrequent static releases; parallel installs easily collide | Supports branches/trunk, but requires long local builds & host tools | **`3.2.2`, `3.2.4`, `fixes_3_2` & nightly `3.3.1` side by side in seconds** |
