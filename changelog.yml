@@ -9,6 +9,7 @@ changelog:
         - 'Reject YAML anchors, aliases and tags in `nik.yaml` with a clear error (quote the value to use it literally) and accept only plain decimal integers for numeric fields'
       deprecated: []
       fixed:
+        - 'Repair a damaged SDK installation (compiler or manifest missing) when running `nik sdk install` instead of reporting it as already installed, and replace an SDK by moving the old one aside first, so a failed `--force` or `nik sdk update` no longer leaves the machine without that SDK'
         - 'Append `.exe`, `.dll`, `.so` or `.dylib` to a default output name that contains a dot (`name: Acme.Tools`), which was mistaken for a file extension'
         - 'Stop zip extraction through `tar`/`unzip` from hanging on tools that print many warnings (their output is drained now), and prefer the system `tar.exe` over a `tar.exe` found earlier in `PATH` on Windows'
         - 'Report argument errors, unknown commands and unexpected exceptions as a JSON object on stdout (empty stderr) when `--json` is given, instead of plain text on stderr'

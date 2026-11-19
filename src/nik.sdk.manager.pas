@@ -622,12 +622,43 @@ begin
     Result := 'unknown';
 end;
 
+// Puts ANewDir at ADestDir. An existing ADestDir is moved aside first and removed only after the
+// new directory is in place, so a failing move (antivirus lock, full disk) leaves the old SDK intact.
+procedure SwapInSdkDirectory(const ANewDir, ADestDir: string);
+var
+  OldDir: string;
+begin
+  if not DirectoryExists(ADestDir) then
+  begin
+    MoveDirectoryAtomic(ANewDir, ADestDir);
+    Exit;
+  end;
+
+  OldDir := Format('%s.old-%d-%d', [ADestDir, GetProcessID, GetTickCount64]);
+  MoveDirectoryAtomic(ADestDir, OldDir);
+  try
+    MoveDirectoryAtomic(ANewDir, ADestDir);
+  except
+    // Put the previous SDK back before reporting the failure.
+    if not DirectoryExists(ADestDir) then
+      MoveDirectoryAtomic(OldDir, ADestDir);
+    raise;
+  end;
+
+  try
+    DeleteDirectoryRecursive(OldDir);
+  except
+    // The new SDK is installed; a leftover hidden '.old-' directory is harmless (never listed).
+    on E: Exception do ;
+  end;
+end;
+
 function FinalizeSdkFromZip(const AZipPath, AExpectedSha256: string;
   AForce, ASkipVerify: Boolean; AQuiet: Boolean = False): TInstalledSdk;
 var
   ExpectedHash, ActualHash, SidecarShaFile: string;
   StagingDir, ExtractedRoot, DestDir, FpcBinPath, CfgPath: string;
-  Manifest: TSdkManifest;
+  Manifest, ExistingManifest: TSdkManifest;
 begin
   if not FileExists(AZipPath) then
     raise ENikError.CreateFmt('SDK archive not found: %s', [AZipPath]);
@@ -677,7 +708,9 @@ begin
     DestDir := JoinPath(GetNikrunSdksDir, Manifest.SdkId);
     if DirectoryExists(DestDir) then
     begin
-      if not AForce then
+      // An interrupted uninstall or install can leave a directory without compiler or manifest.
+      // Only an intact SDK counts as installed; a damaged one is replaced.
+      if (not AForce) and IsValidInstalledSdkDir(DestDir, ExistingManifest) then
       begin
         if not AQuiet then
           WriteInfo(Format('SDK ''%s'' is already installed at %s (use --force to reinstall).',
@@ -687,10 +720,11 @@ begin
         Exit;
       end;
 
-      DeleteDirectoryRecursive(DestDir);
+      if (not AForce) and (not AQuiet) then
+        WriteInfo(Format('Replacing the damaged SDK installation at %s.', [DestDir]));
     end;
 
-    MoveDirectoryAtomic(ExtractedRoot, DestDir);
+    SwapInSdkDirectory(ExtractedRoot, DestDir);
 
     if not SameText(Manifest.TargetOs, 'win64') then
       EnsureBinariesExecutable(JoinPath(DestDir, Manifest.Paths.BinDir));
@@ -714,7 +748,7 @@ function FinalizeSdkFromDirectory(const ASourceDir: string; AForce: Boolean;
   AQuiet: Boolean = False): TInstalledSdk;
 var
   StagingDir, DestDir, FpcBinPath, CfgPath, NormSrc, NormDest: string;
-  Manifest: TSdkManifest;
+  Manifest, ExistingManifest: TSdkManifest;
 begin
   if not DirectoryExists(ASourceDir) then
     raise ENikError.CreateFmt('Local SDK directory not found: %s', [ASourceDir]);
@@ -733,7 +767,7 @@ begin
   begin
     if DirectoryExists(DestDir) then
     begin
-      if not AForce then
+      if (not AForce) and IsValidInstalledSdkDir(DestDir, ExistingManifest) then
       begin
         if not AQuiet then
           WriteInfo(Format('SDK ''%s'' is already installed at %s (use --force to reinstall).',
@@ -742,7 +776,9 @@ begin
         Result.InstallPath := DestDir;
         Exit;
       end;
-      DeleteDirectoryRecursive(DestDir);
+
+      if (not AForce) and (not AQuiet) then
+        WriteInfo(Format('Replacing the damaged SDK installation at %s.', [DestDir]));
     end;
 
     StagingDir := JoinPath(GetNikrunSdksDir, Format('.staging-%d-%d', [GetProcessID, GetTickCount64]));
@@ -753,7 +789,7 @@ begin
       if not AQuiet then
         WriteStep('Copying local SDK directory...');
       CopyDirectoryRecursive(ASourceDir, StagingDir);
-      MoveDirectoryAtomic(StagingDir, DestDir);
+      SwapInSdkDirectory(StagingDir, DestDir);
     finally
       if DirectoryExists(StagingDir) then
         DeleteDirectoryRecursive(StagingDir);

@@ -450,6 +450,20 @@ try {
     $reInst = Invoke-Nik -NikHome $TestHome -Arguments @('sdk', 'install', '3.2.2', '--index-url', $IndexUrl)
     Assert-True ($reInst.Output -match 'already installed') 'nik sdk install skips re-download when already installed'
 
+    # 5b. A damaged installation (compiler binary gone, e.g. after an interrupted uninstall) is repaired by
+    #     'nik sdk install' instead of being reported as "already installed" with exit code 0.
+    $sdkDir322 = Join-Path (Join-Path $TestHome 'sdks') $Mock322.SdkId
+    $sdkManifest322 = Get-Content (Join-Path $sdkDir322 'sdk-manifest.json') -Raw | ConvertFrom-Json
+    $fpcBin322 = Join-Path $sdkDir322 (([string]$sdkManifest322.paths.fpcBinary) -replace '[/\\]', [System.IO.Path]::DirectorySeparatorChar)
+    Remove-Item -Force $fpcBin322
+    Assert-True (-not (Test-Path $fpcBin322)) 'Test setup removed the compiler binary of the installed SDK'
+    $repairInst = Invoke-Nik -NikHome $TestHome -Arguments @('sdk', 'install', '3.2.2', '--index-url', $IndexUrl)
+    Assert-True ((Test-Path $fpcBin322) -and $repairInst.Output -notmatch 'is already installed') 'nik sdk install repairs a damaged SDK installation instead of reporting it as already installed'
+    $oldLeftovers = @(Get-ChildItem -Path (Join-Path $TestHome 'sdks') -Force -Directory | Where-Object { $_.Name -like '*.old-*' -or $_.Name -like '.staging-*' })
+    Assert-True ($oldLeftovers.Count -eq 0) 'Repairing an SDK leaves no .old-* or .staging-* directories behind'
+    $forceInst = Invoke-Nik -NikHome $TestHome -Arguments @('sdk', 'install', '3.2.2', '--force', '--index-url', $IndexUrl)
+    Assert-True ((Test-Path $fpcBin322) -and $forceInst.ExitCode -eq 0 -and @(Get-ChildItem -Path (Join-Path $TestHome 'sdks') -Force -Directory | Where-Object { $_.Name -like '*.old-*' }).Count -eq 0) 'nik sdk install --force replaces an intact SDK and leaves no .old-* directory behind'
+
     # 6. Branch names, SemVer ranges, and SDK IDs are rejected by nik sdk install
     $branchRej = Invoke-Nik -NikHome $TestHome -Arguments @('sdk', 'install', 'main', '--index-url', $IndexUrl) -AllowFailure
     Assert-True ($branchRej.ExitCode -ne 0 -and $branchRej.Output -match 'Invalid Free Pascal SDK version') 'nik sdk install rejects Git branch names (e.g. main)'
