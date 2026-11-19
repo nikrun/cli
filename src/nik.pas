@@ -17,6 +17,7 @@ uses
   nik.cmd.sdk,
   nik.cmd.pkg,
   nik.cmd.build,
+  nik.cmd.tests,
   nik.cmd.lsp;
 
 procedure PrintVersion;
@@ -35,6 +36,7 @@ begin
   WriteLn(StyleBold('COMMANDS:'));
   WriteLn('  ' + PadRightStr('init', 14) + 'Initialize a new Free Pascal project (nik.yaml)');
   WriteLn('  ' + PadRightStr('build', 14) + 'Compile a Free Pascal project using nik.yaml');
+  WriteLn('  ' + PadRightStr('test', 14) + 'Discover, compile, and run fpcunit tests');
   WriteLn('  ' + PadRightStr('pkg', 14) + 'Fetch, update, list, and inspect nik.yaml dependencies');
   WriteLn('  ' + PadRightStr('lsp', 14) + 'Start the Free Pascal Language Server (LSP 3.17)');
   WriteLn('  ' + PadRightStr('sdk', 14) + 'Discover, install, inspect, and remove Free Pascal SDKs');
@@ -158,6 +160,8 @@ begin
       PrintPkgHelp
     else if (Length(FilteredArgs) >= 2) and SameText(FilteredArgs[1], 'build') then
       PrintBuildHelp
+    else if (Length(FilteredArgs) >= 2) and SameText(FilteredArgs[1], 'test') then
+      PrintTestHelp
     else if (Length(FilteredArgs) >= 2) and SameText(FilteredArgs[1], 'lsp') then
       PrintLspHelp
     else
@@ -181,6 +185,8 @@ begin
     Result := ExecutePkgCommand(CmdArgs)
   else if CmdName = 'build' then
     Result := ExecuteBuildCommand(CmdArgs)
+  else if CmdName = 'test' then
+    Result := ExecuteTestCommand(CmdArgs)
   else if CmdName = 'lsp' then
     Result := ExecuteLspCommand(CmdArgs)
   else

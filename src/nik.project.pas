@@ -17,6 +17,7 @@ type
     EntryOverride: string;
     OutputOverride: string;
     CacheSuffix: string;
+    ExtraUnitPaths: TStringArray;
     Clean: Boolean;
     CheckOnly: Boolean;
     Locked: Boolean;
@@ -43,6 +44,7 @@ type
   end;
 
 function SanitizeCacheKey(const ARaw: string): string;
+procedure SplitTripletSpec(const ATriplet: string; out ACpu, AOs: string);
 function ResolveOutputBinaryPath(const AProjectDir, ARawOutput, ATargetOs: string;
   AArtifactKind: TCompileArtifactKind): string;
 
@@ -54,7 +56,8 @@ function BuildCompileSpecFromManifest(const AManifest: TResolvedManifest;
   const ASdk: TInstalledSdk; const AFpcCfgPath: string;
   const APackages: TPackageResolutionResult;
   AArtifactKind: TCompileArtifactKind; AClean: Boolean;
-  const ACacheSuffix: string = ''): TCompileSpec;
+  const ACacheSuffix: string = '';
+  const AExtraUnitPaths: TStringArray = nil): TCompileSpec;
 
 function PrepareProjectTarget(const AOptions: TProjectTargetOptions): TPreparedProjectTarget; overload;
 function PrepareProjectTarget(const AOptions: TProjectTargetOptions;
@@ -258,7 +261,8 @@ function BuildCompileSpecFromManifest(const AManifest: TResolvedManifest;
   const ASdk: TInstalledSdk; const AFpcCfgPath: string;
   const APackages: TPackageResolutionResult;
   AArtifactKind: TCompileArtifactKind; AClean: Boolean;
-  const ACacheSuffix: string): TCompileSpec;
+  const ACacheSuffix: string;
+  const AExtraUnitPaths: TStringArray): TCompileSpec;
 var
   I: Integer;
   CacheKey, SuffixClean: string;
@@ -314,6 +318,8 @@ begin
     AppendUniquePath(EffObjPaths, ResolveRelativePath(AManifest.ProjectDir, AManifest.ResourcePaths[I]));
   end;
 
+  for I := 0 to High(AExtraUnitPaths) do
+    AppendUniquePath(EffUnitPaths, AExtraUnitPaths[I]);
   for I := 0 to High(APackages.UnitPaths) do
     AppendUniquePath(EffUnitPaths, APackages.UnitPaths[I]);
   for I := 0 to High(APackages.IncludePaths) do
@@ -331,8 +337,17 @@ begin
   Result.ObjectPaths := EffObjPaths;
   Result.ManifestFiles := EffManifestFiles;
 
-  Result.OutputBinaryPath := ResolveOutputBinaryPath(
-    AManifest.ProjectDir, AManifest.Output, ASdk.Manifest.TargetOs, AArtifactKind);
+  Result.OutputBinaryPath := '';
+  if (AManifest.ForTest) and (Trim(AManifest.Output) = '') and (AArtifactKind = cakExecutable) then
+    // Test binaries live next to their units inside the checkout-local test cache
+    Result.OutputBinaryPath := ResolveOutputBinaryPath(
+      JoinPath(JoinPath(AManifest.ProjectDir, '.nik'), 'cache'),
+      SanitizeCacheKey(ASdk.Manifest.SdkId + '-' + AManifest.ProfileName + '-test') + '/' +
+        SanitizeCacheKey(StringReplace(AManifest.ProjectName, '.', '_', [rfReplaceAll])) + '-test',
+      ASdk.Manifest.TargetOs, AArtifactKind)
+  else
+    Result.OutputBinaryPath := ResolveOutputBinaryPath(
+      AManifest.ProjectDir, AManifest.Output, ASdk.Manifest.TargetOs, AArtifactKind);
 
   CacheKey := ASdk.Manifest.SdkId + '-' + AManifest.ProfileName;
   SuffixClean := Trim(ACacheSuffix);
@@ -468,6 +483,9 @@ begin
       [ParsedManifest.ManifestPath, ParsedManifest.RootLine]);
 
   // 2. Resolve required SDK (auto-installing when enabled & online) & ensure isolated fpc.cfg
+  if Trim(Result.Manifest.FpcSpec) = '' then
+    raise ENikError.CreateFmt('%s:%d: Missing required ''%s.toolchain.fpc'' (e.g. ''3.2.2'' or ''3.3.1'').',
+      [ParsedManifest.ManifestPath, ParsedManifest.RootLine, ManifestKindToString(ParsedManifest.Kind)]);
   Result.Sdk := ResolveProjectSdk(Result.Manifest.FpcSpec, Result.Manifest.TargetSpec,
     AOptions.AutoInstallSdk, AOptions.Offline, AOptions.QuietSdkInstall, ASdkAutoInstalled);
   Result.SdkAutoInstalled := ASdkAutoInstalled;
@@ -497,7 +515,7 @@ begin
   // 5. Translate resolved manifest + SDK + packages into neutral TCompileSpec & prepare compiler invocation
   ArtifactKind := ResolveTargetArtifactKind(AOptions.Role, Result.Manifest.Kind, AOptions.CheckOnly);
   Spec := BuildCompileSpecFromManifest(Result.Manifest, Result.Sdk, FpcCfgPath,
-    Result.Packages, ArtifactKind, AOptions.Clean, AOptions.CacheSuffix);
+    Result.Packages, ArtifactKind, AOptions.Clean, AOptions.CacheSuffix, AOptions.ExtraUnitPaths);
 
   Result.Compile := PrepareCompile(Spec);
 end;

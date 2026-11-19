@@ -856,8 +856,8 @@ const
     'entry', 'output',
     'toolchain', 'build', 'dependencies', 'test', 'targets', 'profiles'
   );
-  TEST_OVERLAY_KEYS: array[0..4] of string = (
-    'entry', 'output', 'toolchain', 'build', 'dependencies'
+  TEST_OVERLAY_KEYS: array[0..2] of string = (
+    'toolchain', 'build', 'dependencies'
   );
   SUB_OVERLAY_KEYS: array[0..6] of string = (
     'name', 'version', 'entry', 'output', 'toolchain', 'build', 'dependencies'
@@ -899,7 +899,17 @@ begin
             Format('''test'' cannot be nested inside ''%s''.', [AContextPrefix]));
 
         if AScope = osTest then
-          ValidateAllowedKeys(AMap, TEST_OVERLAY_KEYS, AContextPrefix, AManifestPath)
+        begin
+          if AMap.HasKey('entry') then
+            RaiseManifestError(AManifestPath, AMap.Find('entry').Line,
+              Format('''%s.entry'' is no longer supported: ''nik test'' discovers *_test.pas / *.test.pas units automatically (place test units next to the units they test).',
+                [AContextPrefix]));
+          if AMap.HasKey('output') then
+            RaiseManifestError(AManifestPath, AMap.Find('output').Line,
+              Format('''%s.output'' is no longer supported: the test binary is written to the checkout-local test cache (.nik/cache).',
+                [AContextPrefix]));
+          ValidateAllowedKeys(AMap, TEST_OVERLAY_KEYS, AContextPrefix, AManifestPath);
+        end
         else if AScope = osTemplateSub then
           ValidateAllowedKeys(AMap, TEMPLATE_SUB_KEYS, AContextPrefix, AManifestPath)
         else
@@ -924,9 +934,9 @@ begin
   Sub := AMap.Find('entry');
   if Sub <> nil then
   begin
-    if (AKind = mkPackage) and (AScope <> osTest) then
+    if AKind = mkPackage then
       RaiseManifestError(AManifestPath, Sub.Line,
-        '''package'' defines a source unit package without a binary and cannot specify ''entry'' (use ''program'' for an executable, ''library'' for a shared library, or ''test.entry'' for package tests).');
+        '''package'' defines a source unit package without a binary and cannot specify ''entry'' (use ''program'' for an executable or ''library'' for a shared library).');
     AOverlay.HasEntry := True;
     AOverlay.EntryLine := Sub.Line;
     AOverlay.Entry := ExpectScalarString(Sub, AContextPrefix + '.entry', AManifestPath);
@@ -935,9 +945,9 @@ begin
   Sub := AMap.Find('output');
   if Sub <> nil then
   begin
-    if (AKind = mkPackage) and (AScope <> osTest) then
+    if AKind = mkPackage then
       RaiseManifestError(AManifestPath, Sub.Line,
-        '''package'' defines a source unit package without a binary and cannot specify ''output'' (use ''program'' for an executable, ''library'' for a shared library, or ''test.output'' for package tests).');
+        '''package'' defines a source unit package without a binary and cannot specify ''output'' (use ''program'' for an executable or ''library'' for a shared library).');
     AOverlay.HasOutput := True;
     AOverlay.OutputLine := Sub.Line;
     AOverlay.Output := ExpectScalarString(Sub, AContextPrefix + '.output', AManifestPath);
