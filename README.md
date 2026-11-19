@@ -200,6 +200,7 @@ cli/
 │   ├── nik.cmd.build.pas        # `nik build` CLI parser & human/JSON output formatters
 │   ├── nik.lsp.index.pas        # Lazarus CodeTools-backed Object Pascal AST, symbol & doc indexer
 │   ├── nik.lsp.check.pas        # Non-blocking ppc* -Cn workspace & unsaved-overlay check runner
+│   ├── nik.lsp.manifest.pas     # Built-in nik.yaml LSP intelligence (Hover, SDK/path/key Completion, Outline & Go-to-Def)
 │   ├── nik.lsp.server.pas       # TNikPascalLspServer binding nikrun.lsp.server to Nikrun SDKs
 │   └── nik.cmd.lsp.pas          # `nik lsp` CLI parser (--stdio, --socket, --profile, --log-file)
 ├── vendor/

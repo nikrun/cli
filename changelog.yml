@@ -4,6 +4,7 @@ changelog:
       added:
         - 'Automatically download, SHA-256-verify, and configure missing Free Pascal SDKs on `nik build` (unless `--offline` is set), with `toolchain.sdkInstalled` reporting in `nik build --json`'
         - 'Display installed SDK directory sizes and total disk usage in `nik sdk list` and `nik sdk info`, including `sizeBytes` and `totalSizeBytes` in `--json` output'
+        - 'Add built-in `nik.yaml` manifest intelligence to `nik lsp` (`Hover` with `ppc*` flag explanations and live SDK/`nik.lock` status, context-aware key/enum/path `Completion`, dynamic `toolchain.fpc` suggestions combining installed and cached online SDKs, `DocumentSymbol` outline, and `Go to Definition`)'
       changed: []
       deprecated: []
       fixed: []

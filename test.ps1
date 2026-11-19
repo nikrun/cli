@@ -1216,6 +1216,16 @@ end.
                         }
                         & $pumpOutput 50
                     }
+                } elseif ($m -is [hashtable] -and $m.ContainsKey('__waitPath')) {
+                    $proc.StandardInput.BaseStream.Flush()
+                    $targetPath = [string]$m['__waitPath']
+                    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+                    while ((-not (Test-Path $targetPath)) -and ($sw.ElapsedMilliseconds -lt 10000)) {
+                        if ($proc.HasExited -and $null -eq $state.PendingRead) {
+                            break
+                        }
+                        & $pumpOutput 25
+                    }
                 } else {
                     $frm = Format-LspFrame $m
                     $proc.StandardInput.BaseStream.Write($frm, 0, $frm.Length)
@@ -1678,6 +1688,173 @@ end.
         Assert-True ($sess6.Exited -and $sess6.ExitCode -eq 0) 'Cache-invalidation nik lsp session exits cleanly with code 0'
         $ctAppDiagFrame = @($sess6.Frames | Where-Object { $_.PSObject.Properties['method'] -and $_.method -eq 'textDocument/publishDiagnostics' -and $_.params.uri -eq $ctAppUri })[0]
         Assert-True ($null -ne $ctAppDiagFrame -and @($ctAppDiagFrame.params.diagnostics).Count -ge 1 -and $ctAppDiagFrame.params.diagnostics[0].message -match 'ActiveFeatureValue') 'nik lsp purges stale cached .ppu files when nik.yaml defines change so dependent main program reports missing identifier immediately'
+
+        # Session 7: nik.yaml Manifest Code Intelligence (DocumentSymbol, Hover with FPC flags & SDK status, Key/Enum/SDK/Path Completions, background sdk-index.json refresh, and Go-to-Definition)
+        $HostTriplet = "$HostCpu-$HostOs"
+        $LspYamlHome = Join-Path $WorkDir 'nikrun-lsp-yaml-home'
+        $LspYamlSdkDir = Join-Path $LspYamlHome "sdks\nikrun-fpc-sdk-3.2.2-test-$HostTriplet"
+        New-Item -ItemType Directory -Force -Path (Join-Path $LspYamlSdkDir 'bin') | Out-Null
+        $exeSuffix = if ($HostOs -eq 'win64') { '.exe' } else { '' }
+        $ppcDummyRel = if ($HostCpu -eq 'aarch64') { "bin/ppca64$exeSuffix" } else { "bin/ppcx64$exeSuffix" }
+        Set-Content -Path (Join-Path $LspYamlSdkDir ($ppcDummyRel -replace '/', [System.IO.Path]::DirectorySeparatorChar)) -Value 'stub' -Encoding ASCII
+        Set-Content -Path (Join-Path $LspYamlSdkDir "bin\fpc$exeSuffix") -Value 'stub' -Encoding ASCII
+        Set-Content -Path (Join-Path $LspYamlSdkDir 'bin\fpc.cfg') -Value '# stub' -Encoding ASCII
+        ([ordered]@{
+            schemaVersion = 1
+            sdkId         = "nikrun-fpc-sdk-3.2.2-test-$HostTriplet"
+            fpcVersion    = '3.2.2'
+            gitCommit     = 'abcdef1234567890'
+            targetOs      = $HostOs
+            targetCpu     = $HostCpu
+            targetTriplet = $HostTriplet
+            builtAtUtc    = '2026-11-19T12:00:00Z'
+            paths         = [ordered]@{
+                binDir    = 'bin'
+                fpcBinary = "bin/fpc$exeSuffix"
+                ppcBinary = $ppcDummyRel
+            }
+        } | ConvertTo-Json -Depth 5) | Set-Content -Path (Join-Path $LspYamlSdkDir 'sdk-manifest.json') -Encoding UTF8
+
+        # Serve a dedicated remote index.json advertising both installed 3.2.2 and online-only 3.99.0
+        $LspYamlRemoteIndexFile = Join-Path $ServerDir 'lsp-yaml-index.json'
+        ([ordered]@{
+            schemaVersion = 1
+            releaseTag    = 'fpc-sdk-lsp-test'
+            updatedAtUtc  = '2026-11-19T12:00:00Z'
+            sdks          = @(
+                [ordered]@{
+                    sdkId         = "nikrun-fpc-sdk-3.2.2-test-$HostTriplet"
+                    fpcVersion    = '3.2.2'
+                    gitCommit     = 'abcdef1234567890'
+                    targetOs      = $HostOs
+                    targetCpu     = $HostCpu
+                    targetTriplet = $HostTriplet
+                    builtAtUtc    = '2026-11-19T12:00:00Z'
+                    fileName      = "nikrun-fpc-sdk-3.2.2-$HostTriplet.zip"
+                    sizeBytes     = 41943040
+                    sha256        = ('a' * 64)
+                    downloadUrl   = "$BaseUrl/nikrun-fpc-sdk-3.2.2-$HostTriplet.zip"
+                },
+                [ordered]@{
+                    sdkId         = "nikrun-fpc-sdk-3.99.0-online-$HostTriplet"
+                    fpcVersion    = '3.99.0'
+                    gitCommit     = '9999999911111111'
+                    targetOs      = $HostOs
+                    targetCpu     = $HostCpu
+                    targetTriplet = $HostTriplet
+                    builtAtUtc    = '2026-11-19T12:00:00Z'
+                    fileName      = "nikrun-fpc-sdk-3.99.0-$HostTriplet.zip"
+                    sizeBytes     = 52428800
+                    sha256        = ('b' * 64)
+                    downloadUrl   = "$BaseUrl/nikrun-fpc-sdk-3.99.0-$HostTriplet.zip"
+                }
+            )
+        } | ConvertTo-Json -Depth 6) | Set-Content -Path $LspYamlRemoteIndexFile -Encoding UTF8
+
+        $appManifestPath = Join-Path $LspAppDir 'nik.yaml'
+        $appManifestUri  = ConvertTo-FileUri $appManifestPath
+        $yamlDocText = @"
+program:
+  name: lsp-app
+  entry: src/AppMain.pas
+  toolchain:
+    fpc: 3.2.2
+  build:
+    mode: objfpc
+    cOperators: true
+    unitPaths: [src]
+  dependencies:
+    lsp-dep-pkg:
+      path: ../lsp-dep-pkg
+"@
+        $yamlEditingText = @"
+program:
+  name: lsp-app
+  entry: 
+  toolchain:
+    fpc: 
+  build:
+    mode: 
+    cOperators: true
+    
+  dependencies:
+    lsp-dep-pkg:
+      path: ../lsp-dep-pkg
+"@
+
+        $prevYamlIdxEnv = $env:NIKRUN_SDK_INDEX_URL
+        $env:NIKRUN_SDK_INDEX_URL = "$BaseUrl/lsp-yaml-index.json"
+        try {
+            $sess7 = Invoke-LspSession -NikHomeDir $LspYamlHome -ProjectPath $LspAppDir -LogPath '' -Messages @(
+                @{ jsonrpc = '2.0'; id = 70; method = 'initialize'; params = @{ processId = $PID; rootUri = $appRootUri } },
+                @{ jsonrpc = '2.0'; method = 'initialized'; params = @{} },
+                # Opening nik.yaml triggers non-blocking background sdk-index.json cache refresh from $BaseUrl/lsp-yaml-index.json
+                @{ jsonrpc = '2.0'; method = 'textDocument/didOpen'; params = @{ textDocument = @{ uri = $appManifestUri; languageId = 'yaml'; version = 1; text = $yamlDocText } } },
+                @{ __waitPath = (Join-Path $LspYamlHome 'cache\sdk-index.json') },
+                # 71: DocumentSymbol outline on nik.yaml
+                @{ jsonrpc = '2.0'; id = 71; method = 'textDocument/documentSymbol'; params = @{ textDocument = @{ uri = $appManifestUri } } },
+                # 72: Hover on 'cOperators' key (line 7, char 6) -> explains -Sc compiler flag
+                @{ jsonrpc = '2.0'; id = 72; method = 'textDocument/hover'; params = @{ textDocument = @{ uri = $appManifestUri }; position = @{ line = 7; character = 6 } } },
+                # 73: Hover on '3.2.2' SDK version value (line 4, char 10) -> reports Installed locally + SDK ID
+                @{ jsonrpc = '2.0'; id = 73; method = 'textDocument/hover'; params = @{ textDocument = @{ uri = $appManifestUri }; position = @{ line = 4; character = 10 } } },
+                # 74: Go-to-Definition on 'entry: src/AppMain.pas' (line 2, char 12) -> jumps to AppMain.pas
+                @{ jsonrpc = '2.0'; id = 74; method = 'textDocument/definition'; params = @{ textDocument = @{ uri = $appManifestUri }; position = @{ line = 2; character = 12 } } },
+                # 75: Go-to-Definition on 'path: ../lsp-dep-pkg' (line 11, char 15) -> jumps to lsp-dep-pkg/nik.yaml
+                @{ jsonrpc = '2.0'; id = 75; method = 'textDocument/definition'; params = @{ textDocument = @{ uri = $appManifestUri }; position = @{ line = 11; character = 15 } } },
+                # Switch to incomplete editing buffer to test context-aware completions
+                @{ jsonrpc = '2.0'; method = 'textDocument/didChange'; params = @{ textDocument = @{ uri = $appManifestUri; version = 2 }; contentChanges = @( @{ text = $yamlEditingText } ) } },
+                # 76: Completion on 'fpc: ' (line 4, char 9, triggered by ' ') -> installed 3.2.2 + online 3.99.0
+                @{ jsonrpc = '2.0'; id = 76; method = 'textDocument/completion'; params = @{ textDocument = @{ uri = $appManifestUri }; position = @{ line = 4; character = 9 }; context = @{ triggerKind = 2; triggerCharacter = ' ' } } },
+                # 77: Completion on 'mode: ' (line 6, char 10, triggered by ' ') -> objfpc, delphi, delphiunicode
+                @{ jsonrpc = '2.0'; id = 77; method = 'textDocument/completion'; params = @{ textDocument = @{ uri = $appManifestUri }; position = @{ line = 6; character = 10 }; context = @{ triggerKind = 2; triggerCharacter = ' ' } } },
+                # 78: Key completion inside 'build:' (line 8, char 4) -> suggests heaptrc/smartLink, excludes already-present cOperators
+                @{ jsonrpc = '2.0'; id = 78; method = 'textDocument/completion'; params = @{ textDocument = @{ uri = $appManifestUri }; position = @{ line = 8; character = 4 } } },
+                # 79: Path completion on 'entry: ' (line 2, char 9, triggered by ' ') -> suggests src/AppMain.pas
+                @{ jsonrpc = '2.0'; id = 79; method = 'textDocument/completion'; params = @{ textDocument = @{ uri = $appManifestUri }; position = @{ line = 2; character = 9 }; context = @{ triggerKind = 2; triggerCharacter = ' ' } } },
+                @{ jsonrpc = '2.0'; id = 80; method = 'shutdown' },
+                @{ jsonrpc = '2.0'; method = 'exit' }
+            )
+
+            Assert-True ($sess7.Exited -and $sess7.ExitCode -eq 0) 'nik.yaml manifest intelligence nik lsp session exits cleanly with code 0'
+            Assert-True (Test-Path (Join-Path $LspYamlHome 'cache\sdk-index.json')) 'nik lsp caches remote SDK index asynchronously into ~/.nikrun/cache/sdk-index.json on nik.yaml didOpen'
+
+            $ymlSymResp = @($sess7.Frames | Where-Object { $_.PSObject.Properties['id'] -and $_.id -eq 71 })[0]
+            $ymlRootSym = $ymlSymResp.result[0]
+            $ymlChildNames = @($ymlRootSym.children | ForEach-Object { $_.name })
+            Assert-True ($ymlRootSym.name -eq 'program' -and ($ymlChildNames -contains 'toolchain') -and ($ymlChildNames -contains 'build') -and ($ymlChildNames -contains 'dependencies')) 'nik lsp returns hierarchical DocumentSymbol outline for nik.yaml'
+
+            $cOpHovResp = @($sess7.Frames | Where-Object { $_.PSObject.Properties['id'] -and $_.id -eq 72 })[0]
+            Assert-True ($null -ne $cOpHovResp -and $cOpHovResp.result.contents.value -match '-Sc' -and $cOpHovResp.result.contents.value -match 'cOperators') 'nik lsp Hover on nik.yaml attribute explains attribute purpose and exact ppc* compiler flag (-Sc)'
+
+            $fpcHovResp = @($sess7.Frames | Where-Object { $_.PSObject.Properties['id'] -and $_.id -eq 73 })[0]
+            Assert-True ($null -ne $fpcHovResp -and $fpcHovResp.result.contents.value -match 'Installed locally' -and $fpcHovResp.result.contents.value -match 'nikrun-fpc-sdk-3\.2\.2-test') 'nik lsp Hover on toolchain.fpc value reports live local SDK installation status'
+
+            $entryDefResp = @($sess7.Frames | Where-Object { $_.PSObject.Properties['id'] -and $_.id -eq 74 })[0]
+            Assert-True ($null -ne $entryDefResp -and @($entryDefResp.result).Count -eq 1 -and $entryDefResp.result[0].uri -match 'AppMain\.pas$') 'nik lsp Go-to-Definition on nik.yaml entry jumps to target .pas file'
+
+            $depDefResp = @($sess7.Frames | Where-Object { $_.PSObject.Properties['id'] -and $_.id -eq 75 })[0]
+            Assert-True ($null -ne $depDefResp -and @($depDefResp.result).Count -eq 1 -and $depDefResp.result[0].uri -match 'lsp-dep-pkg/nik\.yaml$') 'nik lsp Go-to-Definition on nik.yaml local dependency jumps to package nik.yaml'
+
+            $sdkCmpResp = @($sess7.Frames | Where-Object { $_.PSObject.Properties['id'] -and $_.id -eq 76 })[0]
+            $sdk322Item = @($sdkCmpResp.result.items | Where-Object { $_.label -eq '3.2.2' })[0]
+            $sdk399Item = @($sdkCmpResp.result.items | Where-Object { $_.label -eq '3.99.0' })[0]
+            Assert-True ($null -ne $sdk322Item -and $sdk322Item.detail -match 'installed' -and $null -ne $sdk399Item -and $sdk399Item.detail -match 'available online') 'nik lsp Completion on toolchain.fpc combines locally installed SDKs and online index.json SDK versions with status detail'
+
+            $modeCmpResp = @($sess7.Frames | Where-Object { $_.PSObject.Properties['id'] -and $_.id -eq 77 })[0]
+            $modeLabels = @($modeCmpResp.result.items | ForEach-Object { $_.label })
+            Assert-True (($modeLabels -contains 'objfpc') -and ($modeLabels -contains 'delphi') -and ($modeLabels -contains 'delphiunicode')) 'nik lsp Completion on build.mode suggests valid Object Pascal dialect modes'
+
+            $buildKeyCmpResp = @($sess7.Frames | Where-Object { $_.PSObject.Properties['id'] -and $_.id -eq 78 })[0]
+            $buildKeyLabels = @($buildKeyCmpResp.result.items | ForEach-Object { $_.label })
+            $heapItem = @($buildKeyCmpResp.result.items | Where-Object { $_.label -eq 'heaptrc' })[0]
+            Assert-True (($buildKeyLabels -contains 'heaptrc') -and ($buildKeyLabels -contains 'smartLink') -and ($buildKeyLabels -notcontains 'cOperators') -and $heapItem.textEdit.newText -eq 'heaptrc: ') 'nik lsp Key Completion suggests missing build attributes with trailing ": " and omits duplicate sibling keys'
+
+            $entryCmpResp = @($sess7.Frames | Where-Object { $_.PSObject.Properties['id'] -and $_.id -eq 79 })[0]
+            $entryCmpLabels = @($entryCmpResp.result.items | ForEach-Object { $_.label })
+            Assert-True ($entryCmpLabels -contains 'src/AppMain.pas') 'nik lsp Completion on entry suggests discovered relative .pas entry files'
+        } finally {
+            $env:NIKRUN_SDK_INDEX_URL = $prevYamlIdxEnv
+        }
     }
 
     # -------------------------------------------------------------------------

@@ -13,6 +13,7 @@ function GetNikrunHomeDir: string;
 function GetNikrunSdksDir: string;
 function GetNikrunCacheDir: string;
 function GetNikrunPkgCacheDir: string;
+function GetNikrunSdkIndexCacheFile: string;
 function GetNikrunBinDir: string;
 function GetNikrunTemplateFile: string;
 
@@ -164,6 +165,11 @@ end;
 function GetNikrunPkgCacheDir: string;
 begin
   Result := JoinPath(GetNikrunCacheDir, 'pkg');
+end;
+
+function GetNikrunSdkIndexCacheFile: string;
+begin
+  Result := JoinPath(GetNikrunCacheDir, 'sdk-index.json');
 end;
 
 function GetNikrunBinDir: string;

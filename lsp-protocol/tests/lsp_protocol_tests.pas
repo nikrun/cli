@@ -425,6 +425,27 @@ begin
   end;
 end;
 
+procedure TestCompletionItemTextEditCodec;
+var
+  Item: TLspCompletionItem;
+  Obj, EditObj: TJSONObject;
+begin
+  Item := Default(TLspCompletionItem);
+  Item.LabelText := '3.3.1';
+  Item.Kind := lcikValue;
+  Item.HasTextEdit := True;
+  Item.TextEdit := TLspTextEdit.Create(TLspRange.SingleLine(4, 9, 13), '3.3.1');
+  Obj := CompletionItemToJson(Item);
+  try
+    EditObj := JsonGetObj(Obj, 'textEdit');
+    Check(EditObj <> nil, 'CompletionItem serializes textEdit when HasTextEdit is True');
+    CheckEqStr(JsonGetStr(EditObj, 'newText'), '3.3.1', 'textEdit.newText matches');
+    CheckEqInt(JsonGetInt(JsonGetObj(JsonGetObj(EditObj, 'range'), 'start'), 'character'), 9, 'textEdit.range.start.character matches');
+  finally
+    Obj.Free;
+  end;
+end;
+
 begin
   {$IF Declared(HaltOnNotReleased)}
   HaltOnNotReleased := True;
@@ -433,6 +454,7 @@ begin
     TestUriConversion;
     TestUtf16Mapping;
     TestDocumentStoreIncrementalSync;
+    TestCompletionItemTextEditCodec;
     TestFullServerLifecycleAndDispatch;
     WriteLn(Format('PASS: %d assertions succeeded across nikrun-lsp-protocol test suite.', [TestsPassed]));
     ExitCode := 0;

@@ -14,6 +14,9 @@ function GetEffectiveSdkIndexUrl(const AOverrideUrl: string = ''): string;
 
 function ListInstalledSdks: TInstalledSdkArray;
 function FetchRemoteSdkIndex(const AOverrideUrl: string = ''): TSdkIndex;
+function IsLocalSdkIndexUrl(const AUrl: string): Boolean;
+function TryLoadAvailableSdkIndexForLsp(out AIndex: TSdkIndex;
+  out ANeedsBackgroundRefresh: Boolean): Boolean;
 
 function TryDetectInstalledHostVersion(out AFpcVersion: string): Boolean;
 
@@ -213,6 +216,38 @@ begin
   SortInstalledSdks(Result);
 end;
 
+function IsLocalSdkIndexUrl(const AUrl: string): Boolean;
+var
+  Trimmed: string;
+begin
+  Trimmed := Trim(AUrl);
+  if Trimmed = '' then
+    Exit(False);
+  Result := (not ((Length(Trimmed) >= 7) and SameText(Copy(Trimmed, 1, 7), 'http://'))) and
+            (not ((Length(Trimmed) >= 8) and SameText(Copy(Trimmed, 1, 8), 'https://')));
+end;
+
+procedure BestEffortSaveSdkIndexCache(const AJsonText: string);
+var
+  CacheFile, TmpFile: string;
+begin
+  try
+    CacheFile := GetNikrunSdkIndexCacheFile;
+    EnsureDirExists(ExtractFileDir(CacheFile));
+    TmpFile := Format('%s.tmp.%d.%d', [CacheFile, GetProcessID, GetTickCount64]);
+    WriteFileTextUtf8(TmpFile, AJsonText);
+    if FileExists(CacheFile) then
+      SysUtils.DeleteFile(CacheFile);
+    if not RenameFile(TmpFile, CacheFile) then
+    begin
+      WriteFileTextUtf8(CacheFile, AJsonText);
+      SysUtils.DeleteFile(TmpFile);
+    end;
+  except
+    // Ignore cache write errors (e.g. read-only NIKRUN_HOME)
+  end;
+end;
+
 function FetchRemoteSdkIndex(const AOverrideUrl: string): TSdkIndex;
 var
   Url, JsonText: string;
@@ -220,6 +255,52 @@ begin
   Url := GetEffectiveSdkIndexUrl(AOverrideUrl);
   JsonText := HttpGetText(Url);
   Result := ParseSdkIndexJson(JsonText);
+  if Trim(AOverrideUrl) = '' then
+    BestEffortSaveSdkIndexCache(JsonText);
+end;
+
+function TryLoadAvailableSdkIndexForLsp(out AIndex: TSdkIndex;
+  out ANeedsBackgroundRefresh: Boolean): Boolean;
+const
+  SDK_INDEX_CACHE_TTL_DAYS = 1.0 / 24.0; // 60 minutes
+var
+  EffUrl, CacheFile: string;
+  FileDt: TDateTime;
+begin
+  Result := False;
+  AIndex := Default(TSdkIndex);
+  ANeedsBackgroundRefresh := False;
+
+  EffUrl := GetEffectiveSdkIndexUrl('');
+
+  // Fast-path: local file or file:// index URL requires zero network I/O
+  if IsLocalSdkIndexUrl(EffUrl) then
+  begin
+    try
+      AIndex := FetchRemoteSdkIndex('');
+      ANeedsBackgroundRefresh := False;
+      Exit(True);
+    except
+      // Fall through to cached index if local mirror path is temporarily unavailable
+    end;
+  end;
+
+  CacheFile := GetNikrunSdkIndexCacheFile;
+  if not FileExists(CacheFile) then
+  begin
+    ANeedsBackgroundRefresh := not IsLocalSdkIndexUrl(EffUrl);
+    Exit(False);
+  end;
+
+  try
+    AIndex := ParseSdkIndexJson(ReadFileTextUtf8(CacheFile));
+    Result := True;
+    if (not IsLocalSdkIndexUrl(EffUrl)) and FileAge(CacheFile, FileDt) then
+      ANeedsBackgroundRefresh := (Now - FileDt) > SDK_INDEX_CACHE_TTL_DAYS;
+  except
+    ANeedsBackgroundRefresh := not IsLocalSdkIndexUrl(EffUrl);
+    Result := False;
+  end;
 end;
 
 function IsHostCompatibleSdk(const AManifest: TSdkManifest): Boolean;

@@ -224,6 +224,8 @@ type
     FilterText: string;
     InsertText: string;
     InsertTextFormat: TLspInsertTextFormat;
+    HasTextEdit: Boolean;
+    TextEdit: TLspTextEdit;
   end;
   TLspCompletionItemArray = array of TLspCompletionItem;
 
@@ -742,6 +744,8 @@ begin
     Result.Add('insertText', AItem.InsertText);
   if AItem.InsertTextFormat <> litfUnspecified then
     Result.Add('insertTextFormat', Ord(AItem.InsertTextFormat));
+  if AItem.HasTextEdit then
+    Result.Add('textEdit', TextEditToJson(AItem.TextEdit));
 end;
 
 function CompletionListToJson(const AList: TLspCompletionList): TJSONObject;

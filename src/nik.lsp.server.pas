@@ -5,9 +5,9 @@ unit nik.lsp.server;
 interface
 
 uses
-  SysUtils, Classes,
-  nik.types,
-  nik.lsp.index, nik.lsp.check,
+  SysUtils, Classes, Process,
+  nik.types, nik.paths, nik.fs, nik.sdk.manager,
+  nik.lsp.index, nik.lsp.check, nik.lsp.manifest,
   nikrun.lsp.types, nikrun.lsp.uri, nikrun.lsp.utf16,
   nikrun.lsp.transport, nikrun.lsp.documents, nikrun.lsp.server;
 
@@ -44,12 +44,19 @@ type
     FLastReportSeq: QWord;
 
     FActiveCheck: TNikAsyncCompilerCheck;
+    FSdkIndexRefreshProc: TProcess;
+    FSdkIndexRefreshStartedMs: QWord;
+    FLastSdkIndexRefreshAttemptMs: QWord;
     FHasPendingDebounce: Boolean;
     FDebounceKey: string;
     FDebounceUri: string;
     FDebounceFilePath: string;
     FDebounceDeadlineMs: QWord;
     FPendingQueue: array of TNikQueuedValidation;
+
+    procedure StopSdkIndexRefreshProcess;
+    procedure MaybeStartBackgroundSdkIndexRefresh;
+    procedure PollSdkIndexRefreshProcess;
 
     function DetermineWorkspaceRootDir: string;
     function IsManifestFilePath(const AFilePath: string): Boolean;
@@ -136,17 +143,111 @@ begin
   FReports := TFPList.Create;
   FLastReportSeq := 0;
   FActiveCheck := nil;
+  FSdkIndexRefreshProc := nil;
+  FSdkIndexRefreshStartedMs := 0;
+  FLastSdkIndexRefreshAttemptMs := 0;
   FHasPendingDebounce := False;
   FPendingQueue := nil;
 end;
 
 destructor TNikPascalLspServer.Destroy;
 begin
+  StopSdkIndexRefreshProcess;
   FreeAndNil(FActiveCheck);
   ClearReports;
   FreeAndNil(FReports);
   FreeAndNil(FIndex);
   inherited Destroy;
+end;
+
+procedure TNikPascalLspServer.StopSdkIndexRefreshProcess;
+begin
+  if FSdkIndexRefreshProc = nil then
+    Exit;
+  try
+    if FSdkIndexRefreshProc.Running then
+      FSdkIndexRefreshProc.Terminate(1);
+  except
+  end;
+  FreeAndNil(FSdkIndexRefreshProc);
+end;
+
+procedure TNikPascalLspServer.MaybeStartBackgroundSdkIndexRefresh;
+const
+  MIN_REFRESH_RETRY_INTERVAL_MS = 300000; // 5 minutes between background attempts
+var
+  DummyIndex: TSdkIndex;
+  NeedsRefresh: Boolean;
+  NowMs: QWord;
+  SelfExe: string;
+begin
+  if FSdkIndexRefreshProc <> nil then
+    Exit;
+
+  NowMs := GetTickCount64;
+  if (FLastSdkIndexRefreshAttemptMs > 0) and
+     (NowMs - FLastSdkIndexRefreshAttemptMs < MIN_REFRESH_RETRY_INTERVAL_MS) then
+    Exit;
+
+  TryLoadAvailableSdkIndexForLsp(DummyIndex, NeedsRefresh);
+  if not NeedsRefresh then
+    Exit;
+
+  SelfExe := ParamStr(0);
+  if (SelfExe = '') or (not FileExists(SelfExe)) then
+    Exit;
+
+  FLastSdkIndexRefreshAttemptMs := NowMs;
+  FSdkIndexRefreshProc := TProcess.Create(nil);
+  try
+    FSdkIndexRefreshProc.Executable := SelfExe;
+    FSdkIndexRefreshProc.Parameters.Add('--no-color');
+    FSdkIndexRefreshProc.Parameters.Add('--nikrun-home');
+    FSdkIndexRefreshProc.Parameters.Add(GetNikrunHomeDir);
+    FSdkIndexRefreshProc.Parameters.Add('sdk');
+    FSdkIndexRefreshProc.Parameters.Add('list');
+    FSdkIndexRefreshProc.Parameters.Add('--remote');
+    FSdkIndexRefreshProc.Parameters.Add('--json');
+    FSdkIndexRefreshProc.Options := [poUsePipes, poStderrToOutPut, poNoConsole];
+    FSdkIndexRefreshProc.ShowWindow := swoHIDE;
+    FSdkIndexRefreshProc.Execute;
+    FSdkIndexRefreshStartedMs := NowMs;
+  except
+    FreeAndNil(FSdkIndexRefreshProc);
+  end;
+end;
+
+procedure TNikPascalLspServer.PollSdkIndexRefreshProcess;
+const
+  MAX_SDK_INDEX_REFRESH_MS = 15000;
+var
+  Buf: array[0..4095] of Byte;
+  Avail: LongInt;
+begin
+  if FSdkIndexRefreshProc = nil then
+    Exit;
+
+  try
+    if FSdkIndexRefreshProc.Output <> nil then
+    begin
+      Avail := FSdkIndexRefreshProc.Output.NumBytesAvailable;
+      while Avail > 0 do
+      begin
+        if Avail > SizeOf(Buf) then
+          Avail := SizeOf(Buf);
+        if FSdkIndexRefreshProc.Output.Read(Buf[0], Avail) <= 0 then
+          Break;
+        Avail := FSdkIndexRefreshProc.Output.NumBytesAvailable;
+      end;
+    end;
+
+    if not FSdkIndexRefreshProc.Running then
+      FreeAndNil(FSdkIndexRefreshProc)
+    else if (GetTickCount64 - FSdkIndexRefreshStartedMs) > MAX_SDK_INDEX_REFRESH_MS then
+      StopSdkIndexRefreshProcess;
+  except
+    StopSdkIndexRefreshProcess;
+  end;
 end;
 
 procedure TNikPascalLspServer.ClearReports;
@@ -561,8 +662,12 @@ begin
   ACaps.WorkspaceSymbolProvider := True;
 
   ACaps.CompletionProvider := True;
-  SetLength(ACaps.CompletionTriggerChars, 1);
+  SetLength(ACaps.CompletionTriggerChars, 5);
   ACaps.CompletionTriggerChars[0] := '.';
+  ACaps.CompletionTriggerChars[1] := ':';
+  ACaps.CompletionTriggerChars[2] := ' ';
+  ACaps.CompletionTriggerChars[3] := '/';
+  ACaps.CompletionTriggerChars[4] := '@';
 
   ACaps.SignatureHelpProvider := True;
   SetLength(ACaps.SignatureTriggerChars, 2);
@@ -660,6 +765,7 @@ end;
 
 procedure TNikPascalLspServer.DoShutdown;
 begin
+  StopSdkIndexRefreshProcess;
   FHasPendingDebounce := False;
   SetLength(FPendingQueue, 0);
   if FActiveCheck <> nil then
@@ -701,6 +807,7 @@ begin
     Exit;
   if IsManifestFilePath(ADoc.FilePath) then
   begin
+    MaybeStartBackgroundSdkIndexRefresh;
     ValidateManifestTextForLsp(ADoc.FilePath, ADoc.Text, FProfileName, ManDiags);
     PublishDiagnostics(ADoc.Uri, ManDiags);
     if Length(ManDiags) > 0 then
@@ -902,6 +1009,9 @@ begin
   if Length(FPendingQueue) > 0 then
     Exit(0);
 
+  if FSdkIndexRefreshProc <> nil then
+    Exit(50);
+
   Result := -1;
 end;
 
@@ -909,6 +1019,8 @@ procedure TNikPascalLspServer.DoIdleTick;
 var
   DebUri, DebPath: string;
 begin
+  PollSdkIndexRefreshProcess;
+
   if (FActiveCheck <> nil) and FActiveCheck.PollFinished then
     CompleteActiveCheck;
 
@@ -927,10 +1039,24 @@ end;
 function TNikPascalLspServer.DoDocumentSymbol(const AUri: string; ADoc: TLspDocument): TLspDocumentSymbolArray;
 var
   DocPath: string;
+  TempDoc: TLspDocument;
 begin
   DocPath := ResolveDocFilePath(AUri, ADoc);
   if IsManifestFilePath(DocPath) then
+  begin
+    if ADoc <> nil then
+      Exit(BuildManifestDocumentSymbols(ADoc));
+    if (DocPath <> '') and FileExists(DocPath) then
+    begin
+      TempDoc := TLspDocument.Create(AUri, 'yaml', 0, ReadFileTextUtf8(DocPath));
+      try
+        Exit(BuildManifestDocumentSymbols(TempDoc));
+      finally
+        TempDoc.Free;
+      end;
+    end;
     Exit(nil);
+  end;
   EnsureIndexedDoc(AUri, ADoc);
   Result := FIndex.BuildDocumentSymbols(AUri, DocPath);
 end;
@@ -945,14 +1071,30 @@ function TNikPascalLspServer.DoDefinition(const AUri: string; ADoc: TLspDocument
 var
   DocPath: string;
   I: Integer;
-  OpenDoc: TLspDocument;
+  OpenDoc, TempDoc: TLspDocument;
 begin
   Result := nil;
   DocPath := ResolveDocFilePath(AUri, ADoc);
   if IsManifestFilePath(DocPath) then
-    Exit;
-  EnsureIndexedDoc(AUri, ADoc);
-  Result := FIndex.ResolveDefinitions(AUri, DocPath, ADoc, APos);
+  begin
+    if ADoc <> nil then
+      Result := ResolveManifestDefinitions(DocPath, ADoc, APos)
+    else if (DocPath <> '') and FileExists(DocPath) then
+    begin
+      TempDoc := TLspDocument.Create(AUri, 'yaml', 0, ReadFileTextUtf8(DocPath));
+      try
+        Result := ResolveManifestDefinitions(DocPath, TempDoc, APos);
+      finally
+        TempDoc.Free;
+      end;
+    end;
+  end
+  else
+  begin
+    EnsureIndexedDoc(AUri, ADoc);
+    Result := FIndex.ResolveDefinitions(AUri, DocPath, ADoc, APos);
+  end;
+
   for I := 0 to High(Result) do
   begin
     OpenDoc := Documents.FindDocument(Result[I].Uri);
@@ -971,7 +1113,7 @@ begin
   Result := nil;
   DocPath := ResolveDocFilePath(AUri, ADoc);
   if IsManifestFilePath(DocPath) then
-    Exit;
+    Exit(DoDefinition(AUri, ADoc, APos));
   EnsureIndexedDoc(AUri, ADoc);
   Result := FIndex.ResolveDeclarations(AUri, DocPath, ADoc, APos);
   for I := 0 to High(Result) do
@@ -986,11 +1128,25 @@ function TNikPascalLspServer.DoHover(const AUri: string; ADoc: TLspDocument;
   const APos: TLspPosition): TLspHover;
 var
   DocPath: string;
+  TempDoc: TLspDocument;
 begin
   Result := Default(TLspHover);
   DocPath := ResolveDocFilePath(AUri, ADoc);
   if IsManifestFilePath(DocPath) then
+  begin
+    if ADoc <> nil then
+      Exit(ResolveManifestHover(DocPath, ADoc, APos));
+    if (DocPath <> '') and FileExists(DocPath) then
+    begin
+      TempDoc := TLspDocument.Create(AUri, 'yaml', 0, ReadFileTextUtf8(DocPath));
+      try
+        Exit(ResolveManifestHover(DocPath, TempDoc, APos));
+      finally
+        TempDoc.Free;
+      end;
+    end;
     Exit;
+  end;
   EnsureIndexedDoc(AUri, ADoc);
   Result := FIndex.ResolveHover(AUri, DocPath, ADoc, APos);
 end;
@@ -999,10 +1155,29 @@ function TNikPascalLspServer.DoCompletion(const AUri: string; ADoc: TLspDocument
   const APos: TLspPosition; const ATriggerChar: string): TLspCompletionList;
 var
   DocPath: string;
+  TempDoc: TLspDocument;
 begin
   DocPath := ResolveDocFilePath(AUri, ADoc);
   if IsManifestFilePath(DocPath) then
+  begin
+    if ADoc <> nil then
+      Exit(ResolveManifestCompletions(DocPath, ADoc, APos, ATriggerChar));
+    if (DocPath <> '') and FileExists(DocPath) then
+    begin
+      TempDoc := TLspDocument.Create(AUri, 'yaml', 0, ReadFileTextUtf8(DocPath));
+      try
+        Exit(ResolveManifestCompletions(DocPath, TempDoc, APos, ATriggerChar));
+      finally
+        TempDoc.Free;
+      end;
+    end;
     Exit(Default(TLspCompletionList));
+  end;
+
+  // For Object Pascal files, only '.' (or explicit/identifier invocation '') triggers completions
+  if (ATriggerChar <> '') and (ATriggerChar <> '.') then
+    Exit(Default(TLspCompletionList));
+
   EnsureIndexedDoc(AUri, ADoc);
   Result := FIndex.ResolveCompletions(AUri, DocPath, ADoc, APos);
 end;
