@@ -910,6 +910,10 @@ begin
   end;
 
   ReadOptStr(AMap, 'name', AContextPrefix, AManifestPath, False, AOverlay.HasName, AOverlay.Name);
+  if AOverlay.HasName and (not IsValidManifestName(AKind, AOverlay.Name)) then
+    RaiseManifestError(AManifestPath, AMap.Find('name').Line,
+      Format('Invalid ''%s.name'' ''%s'': use a plain name without path separators, ''..'', '':'' or wildcard characters.',
+        [AContextPrefix, AOverlay.Name]));
   ReadOptStr(AMap, 'version', AContextPrefix, AManifestPath, False, AOverlay.HasVersion, AOverlay.Version);
   ReadOptStr(AMap, 'description', AContextPrefix, AManifestPath, True, AOverlay.HasDescription, AOverlay.Description);
   ReadOptStr(AMap, 'license', AContextPrefix, AManifestPath, False, AOverlay.HasLicense, AOverlay.License);

@@ -5,10 +5,14 @@ unit nik.cmd.init;
 interface
 
 uses
-  SysUtils, Classes;
+  SysUtils, Classes, nik.manifest.types;
 
 function ExecuteInitCommand(const AArgs: array of string): Integer;
 procedure PrintInitHelp;
+
+{ Pascal identifier used for the generated program or unit: a CamelCase form of the project name
+  that is never a reserved word and, for libraries and packages, never a standard unit name. }
+function DeriveStarterIdentifier(AKind: TManifestKind; const AProjectName: string): string;
 
 implementation
 
@@ -20,7 +24,6 @@ uses
   nik.fs,
   nik.term,
   nik.sdk.manager,
-  nik.manifest.types,
   nik.manifest.io,
   nik.manifest.resolve,
   nik.pkg.types,
@@ -114,6 +117,58 @@ begin
 
   if Result = '' then
     Result := 'MainProject';
+end;
+
+function IsReservedPascalWord(const AIdent: string): Boolean;
+const
+  RESERVED: array[0..57] of string = (
+    'and', 'array', 'as', 'asm', 'begin', 'case', 'class', 'const', 'constructor', 'destructor',
+    'div', 'do', 'downto', 'else', 'end', 'except', 'exports', 'file', 'finalization', 'finally',
+    'for', 'function', 'goto', 'if', 'implementation', 'in', 'inherited', 'initialization', 'inline',
+    'interface', 'is', 'label', 'library', 'mod', 'nil', 'not', 'object', 'of', 'on', 'operator', 'or',
+    'packed', 'procedure', 'program', 'property', 'raise', 'record', 'repeat', 'resourcestring', 'set',
+    'shl', 'shr', 'string', 'then', 'threadvar', 'to', 'try', 'type');
+var
+  Lower: string;
+  I: Integer;
+begin
+  Lower := LowerCase(AIdent);
+  for I := Low(RESERVED) to High(RESERVED) do
+    if RESERVED[I] = Lower then
+      Exit(True);
+  Result := (Lower = 'unit') or (Lower = 'uses') or (Lower = 'var') or (Lower = 'while') or
+            (Lower = 'with') or (Lower = 'xor');
+end;
+
+function IsStandardUnitName(const AIdent: string): Boolean;
+const
+  UNITS: array[0..23] of string = (
+    'system', 'sysutils', 'classes', 'types', 'math', 'strings', 'strutils', 'dateutils', 'variants',
+    'contnrs', 'character', 'typinfo', 'process', 'fpjson', 'jsonparser', 'sockets', 'syncobjs',
+    'windows', 'unix', 'baseunix', 'objpas', 'ctypes', 'getopts', 'inifiles');
+var
+  Lower: string;
+  I: Integer;
+begin
+  Lower := LowerCase(AIdent);
+  for I := Low(UNITS) to High(UNITS) do
+    if UNITS[I] = Lower then
+      Exit(True);
+  Result := False;
+end;
+
+function DeriveStarterIdentifier(AKind: TManifestKind; const AProjectName: string): string;
+begin
+  Result := SanitizePascalIdentifier(AProjectName);
+  // A reserved word cannot name a program or unit, and a library or package unit named like a
+  // standard unit would hide it from every `uses` clause of the project.
+  if IsReservedPascalWord(Result) or ((AKind <> mkProgram) and IsStandardUnitName(Result)) then
+  begin
+    if AKind = mkProgram then
+      Result := Result + 'App'
+    else
+      Result := Result + 'Unit';
+  end;
 end;
 
 function NeedsYamlQuoting(const S: string): Boolean;
@@ -672,6 +727,18 @@ begin
         'Project manifest already exists in %s (pass --force to overwrite nik.yaml).',
         [TargetDir]);
 
+    // Decide and check the project name before anything is detected, read or created.
+    if Trim(NameOverride) <> '' then
+      ProjectName := Trim(NameOverride)
+    else
+      ProjectName := ExtractFileName(TargetDir);
+    if Trim(ProjectName) = '' then
+      ProjectName := 'my-app';
+    if not IsValidManifestName(Kind, ProjectName) then
+      raise ENikError.CreateFmt(
+        'Invalid project name ''%s'': use a plain name without path separators, ''..'', '':'' or wildcard characters (pass --name <NAME> to choose another).',
+        [ProjectName]);
+
     // Load optional template (~/.nikrun/template.yaml or explicit --template)
     HasTemplate := False;
     Template := Default(TParsedTemplate);
@@ -699,16 +766,7 @@ begin
         'Cannot determine Free Pascal version for nik.yaml (no SDK installed in %s and no toolchain.fpc in %s). Run ''nik sdk install 3.2.2'' first or pass ''--fpc <version>''.',
         [GetNikrunSdksDir, GetNikrunTemplateFile]);
 
-    EnsureDirExists(TargetDir);
-
-    if Trim(NameOverride) <> '' then
-      ProjectName := Trim(NameOverride)
-    else
-      ProjectName := ExtractFileName(TargetDir);
-    if Trim(ProjectName) = '' then
-      ProjectName := 'my-app';
-
-    PasIdent := SanitizePascalIdentifier(ProjectName);
+    PasIdent := DeriveStarterIdentifier(Kind, ProjectName);
     case Kind of
       mkProgram:
         begin
@@ -735,6 +793,9 @@ begin
     // Self-verify generated nik.yaml against strict manifest schema + resolver before writing
     Validated := ParseManifestText(YamlText, ManifestPath, TargetDir);
     ResolveManifestConfig(Validated, 'debug', GetHostCpu, GetHostOs, False, Kind <> mkPackage);
+
+    // Everything is validated: only now touch the file system.
+    EnsureDirExists(TargetDir);
 
     if HasTemplate and Template.Base.Build.HasMode then
       EffMode := Template.Base.Build.Mode

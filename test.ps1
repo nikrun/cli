@@ -409,6 +409,12 @@ try {
     $initNoSdkRes = Invoke-Nik -NikHome $TestHome -Arguments @('init', $EmptyInitDir) -AllowFailure
     Assert-True ($initNoSdkRes.ExitCode -ne 0 -and $initNoSdkRes.Output -match 'Cannot determine Free Pascal version') 'nik init fails cleanly when no SDK is installed and no --fpc or template.yaml is given'
 
+    # 2c. nik init rejects an unsafe project name before it touches the SDK lookup or the file system
+    $UnsafeInitDir = Join-Path $WorkDir 'init-unsafe-name'
+    $initBadName = Invoke-Nik -NikHome $TestHome -Arguments @('init', $UnsafeInitDir, '--name', '../../escape') -AllowFailure
+    Assert-True ($initBadName.ExitCode -ne 0 -and $initBadName.Output -match 'Invalid project name') 'nik init rejects a project name with path traversal (even without an installed SDK)'
+    Assert-True (-not (Test-Path $UnsafeInitDir)) 'nik init leaves no directory behind when the project name is invalid'
+
     # 3. Remote list over HTTP
     $remJson = (Invoke-Nik -NikHome $TestHome -Arguments @('sdk', 'list', '--remote', '--index-url', $IndexUrl, '--json')).Output | ConvertFrom-Json
     Assert-True ($remJson.sdks.Count -eq 3) 'nik sdk list --remote fetches remote index over HTTP'
@@ -534,6 +540,11 @@ try {
 
     $dupInit = Invoke-Nik -NikHome $TestHome -Arguments @('init', $InitProgDir) -AllowFailure
     Assert-True ($dupInit.ExitCode -ne 0 -and $dupInit.Output -match 'already exists') 'nik init refuses to overwrite existing nik.yaml without --force'
+
+    $InitEndDir = Join-Path $WorkDir 'init-reserved-name'
+    $initEnd = (Invoke-Nik -NikHome $TestHome -Arguments @('init', $InitEndDir, '--pkg', '--name', 'types', '--json')).Output | ConvertFrom-Json
+    $initEndSource = Get-Content -Raw -Path (Join-Path (Join-Path $InitEndDir 'src') 'TypesUnit.pas')
+    Assert-True ($initEnd.success -eq $true -and $initEndSource -match '(?m)^unit TypesUnit;') 'nik init --pkg never generates a unit that hides a standard unit (types -> TypesUnit)'
 
     # 10b. ~/.nikrun/template.yaml applied by nik init (--lib and --pkg) + typo validation
     $TemplateYamlPath = Join-Path $TestHome 'template.yaml'

@@ -14,7 +14,10 @@ uses
   nik.pkg.types,
   nik.pkg.lock,
   nik.pkg.fetch,
-  nik.sdk.config;
+  nik.sdk.config,
+  nik.manifest.types,
+  nik.manifest.io,
+  nik.cmd.init;
 
 type
   TTestProc = procedure;
@@ -536,6 +539,72 @@ begin
   CheckEnikError('Invalid commit', 'fetch with an empty commit', @DoEnsureGitPackage);
 end;
 
+{ ---- project names and starter identifiers (nik.manifest.types, nik.manifest.io, nik.cmd.init) ---- }
+
+procedure TestManifestNameRules;
+begin
+  Check(IsValidManifestName(mkProgram, 'my-app'), 'program name with dash');
+  Check(IsValidManifestName(mkProgram, 'Acme.Tools'), 'program name with dot');
+  Check(IsValidManifestName(mkProgram, 'my app'), 'program name with space');
+  Check(not IsValidManifestName(mkProgram, ''), 'empty program name');
+  Check(not IsValidManifestName(mkProgram, '../../x'), 'program name with traversal');
+  Check(not IsValidManifestName(mkProgram, 'a/b'), 'program name with slash');
+  Check(not IsValidManifestName(mkLibrary, 'a\b'), 'library name with backslash');
+  Check(not IsValidManifestName(mkLibrary, 'C:x'), 'library name with drive colon');
+  Check(not IsValidManifestName(mkLibrary, 'lib*'), 'library name with wildcard');
+  Check(IsValidManifestName(mkPackage, 'my-pkg'), 'package name');
+  Check(IsValidManifestName(mkPackage, 'owner/pkg'), 'package name with owner prefix');
+  Check(not IsValidManifestName(mkPackage, '../pkg'), 'package name with traversal');
+  Check(not IsValidManifestName(mkPackage, '/abs/pkg'), 'rooted package name');
+end;
+
+var
+  GManifestText: string;
+
+procedure DoParseManifest;
+var
+  Parsed: TParsedManifest;
+begin
+  Parsed := ParseManifestText(GManifestText, 'nik.yaml', GetTempDir(False));
+  if Parsed.ManifestPath = '<never>' then
+    raise Exception.Create('unreachable');
+end;
+
+function ProgramManifestText(const AName: string): string;
+begin
+  Result := 'schemaVersion: 1'#10 +
+    'program:'#10 +
+    '  name: ' + AName + #10 +
+    '  entry: src/main.pas'#10 +
+    '  toolchain:'#10 +
+    '    fpc: 3.2.2'#10;
+end;
+
+procedure TestManifestRejectsUnsafeName;
+begin
+  GManifestText := ProgramManifestText('Acme.Tools');
+  DoParseManifest;
+  Check(True, 'manifest with a dotted program name parses');
+
+  GManifestText := ProgramManifestText('../../x');
+  CheckEnikError('Invalid ''program.name''', 'program name traversal', @DoParseManifest);
+  GManifestText := ProgramManifestText('"a/b"');
+  CheckEnikError('Invalid ''program.name''', 'program name with slash', @DoParseManifest);
+end;
+
+procedure TestStarterIdentifiers;
+begin
+  CheckEqStr(DeriveStarterIdentifier(mkProgram, 'my-app'), 'MyApp', 'camel case');
+  CheckEqStr(DeriveStarterIdentifier(mkProgram, 'end'), 'EndApp', 'reserved word as program name');
+  CheckEqStr(DeriveStarterIdentifier(mkLibrary, 'unit'), 'UnitUnit', 'reserved word as library name');
+  CheckEqStr(DeriveStarterIdentifier(mkPackage, 'types'), 'TypesUnit', 'RTL unit name as package unit');
+  CheckEqStr(DeriveStarterIdentifier(mkPackage, 'Math'), 'MathUnit', 'RTL unit name keeps no case');
+  CheckEqStr(DeriveStarterIdentifier(mkLibrary, 'System'), 'SystemUnit', 'System as library unit');
+  CheckEqStr(DeriveStarterIdentifier(mkProgram, 'math'), 'Math', 'a program may share a unit name');
+  CheckEqStr(DeriveStarterIdentifier(mkPackage, 'strutils-extra'), 'StrutilsExtra', 'longer names are untouched');
+  CheckEqStr(DeriveStarterIdentifier(mkProgram, '1st app'), 'Project1stApp', 'leading digit');
+end;
+
 { ---- runner ---- }
 
 procedure RunTest(const AName: string; AProc: TTestProc);
@@ -557,6 +626,9 @@ begin
     RunTest('lock: apostrophes round trip', @TestLockFileWithApostrophesRoundTrips);
     RunTest('lock: non-hex rev is rejected', @TestLockRejectsNonHexRev);
     RunTest('fetch: non-hex commit never reaches git', @TestGitFetchRejectsNonHexCommit);
+    RunTest('manifest: name rules', @TestManifestNameRules);
+    RunTest('manifest: unsafe names are rejected', @TestManifestRejectsUnsafeName);
+    RunTest('init: starter identifiers', @TestStarterIdentifiers);
     RunTest('paths: safe segments and relative paths', @TestSafePathHelpers);
     RunTest('sdk: index rejects unsafe names', @TestSdkIndexRejectsUnsafeNames);
     RunTest('sdk: remote entries need a checksum', @TestRemoteEntryNeedsChecksum);

@@ -250,7 +250,14 @@ type
 function ManifestKindToString(AKind: TManifestKind): string;
 procedure RaiseManifestError(const APath: string; ALine: Integer; const AMsg: string);
 
+{ A program or library name becomes a file name (default output bin/<name>), so it must be a
+  plain name. A package name may be a relative path like owner/pkg but must not leave its base. }
+function IsValidManifestName(AKind: TManifestKind; const AName: string): Boolean;
+
 implementation
+
+uses
+  nik.paths;
 
 function ManifestKindToString(AKind: TManifestKind): string;
 begin
@@ -269,6 +276,16 @@ begin
     raise ENikError.CreateFmt('%s:%d: %s', [APath, ALine, AMsg])
   else
     raise ENikError.CreateFmt('%s: %s', [APath, AMsg]);
+end;
+
+function IsValidManifestName(AKind: TManifestKind; const AName: string): Boolean;
+begin
+  case AKind of
+    mkProgram, mkLibrary: Result := IsSafePathSegment(AName);
+    mkPackage: Result := IsSafeRelativePath(AName) and (AName = Trim(AName));
+  else
+    raise ENikError.CreateFmt('Unsupported TManifestKind ordinal: %d', [Ord(AKind)]);
+  end;
 end;
 
 end.
