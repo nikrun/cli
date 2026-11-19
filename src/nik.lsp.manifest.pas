@@ -336,7 +336,6 @@ function IsEntryFileField(const ACanonicalField: string): Boolean;
 begin
   Result :=
     (ACanonicalField = 'artifact.entry') or
-    (ACanonicalField = 'test.entry') or
     (ACanonicalField = 'subOverlay.entry');
 end;
 
@@ -1467,7 +1466,7 @@ begin
       'Declares a native shared library (`library MyLib;`). Automatically enables PIC (`-Cg`) on Unix targets when `build.pic` is `auto`.'));
     AppendKeySpec(ASpecs, Result, MakeKeySpec('package', yvkMapping, 'mapping', '', '',
       'Reusable source-first Object Pascal unit package.',
-      'Declares a reusable collection of Object Pascal units without a standalone binary (`entry` and `output` are disallowed outside `test`).'));
+      'Declares a reusable collection of Object Pascal units without a standalone binary (`entry` and `output` are not allowed; use `nik test` with `*_test.pas` / `*.test.pas` units for package tests).'));
     Exit;
   end;
 
@@ -1499,11 +1498,11 @@ begin
         'Optional list of author names or `Name <email>` entries.'));
     end;
 
-    if (not IsTpl) and ((not IsPkg) or (ACanonicalParent = 'test')) then
+    if (not IsTpl) and (not IsPkg) and (ACanonicalParent <> 'test') then
     begin
       AppendKeySpec(ASpecs, Result, MakeKeySpec('entry', yvkScalar, 'string (path)', '', '<entry.pas>',
         'Main Free Pascal entry source file (`.pas` / `.lpr` / `.dpr`).',
-        'Relative path to the main program, library, or test runner source file passed to `ppc*`. **Required** on `program`, `library`, and `test`.'));
+        'Relative path to the main program or library source file passed to `ppc*`. **Required** on `program` and `library`.'));
       AppendKeySpec(ASpecs, Result, MakeKeySpec('output', yvkScalar, 'string (path)', 'bin/<name>', '-FE / -o',
         'Output binary path (OS file extension added automatically).',
         'Relative output path for the compiled executable or shared library. Platform extensions (`.exe`, `.dll`, `.so`, `.dylib`) are appended automatically if omitted.'));
@@ -1524,7 +1523,7 @@ begin
       if not IsTpl then
         AppendKeySpec(ASpecs, Result, MakeKeySpec('test', yvkMapping, 'mapping', '', '',
           'Test target overlay (`nik test`).',
-          'Overlay applied when compiling and running tests (`test.entry`, test-only `unitPaths`, `heaptrc`, and `test.dependencies`).'));
+          'Overlay applied when compiling and running tests (test-only `unitPaths`, `defines`, `heaptrc`, and `test.dependencies`). `nik test` discovers `*_test.pas` / `*.test.pas` fpcunit units next to your code automatically; there is no `entry` or `output`.'));
       AppendKeySpec(ASpecs, Result, MakeKeySpec('targets', yvkMapping, 'mapping', '', '',
         'Automatic OS and CPU architecture overlays.',
         'Platform-specific overlays applied automatically in order of specificity: `unix` -> OS (`windows`/`linux`/`darwin`) -> CPU (`x86_64`/`aarch64`) -> exact `<cpu>-<os>` triplet.'));

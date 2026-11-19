@@ -87,6 +87,14 @@ type
 function ResolveLspWorkspace(const ARootDir, AManifestOverride, AProfileName: string;
   out AContext: TNikWorkspaceContext; out AWarningMsg: string): Boolean;
 
+{ Same as ResolveLspWorkspace but resolved for the 'test' overlay (test.build + test.dependencies) used for
+  *_test.pas / *.test.pas documents (see internal-notes/specs/nik-test.md, section 6). }
+function ResolveLspTestWorkspace(const ARootDir, AManifestOverride, AProfileName: string;
+  out AContext: TNikWorkspaceContext; out AWarningMsg: string): Boolean;
+
+{ True when AFilePath follows the test unit naming convention and is analyzed in the test context. }
+function IsLspTestDocument(const AFilePath: string): Boolean;
+
 function ValidateManifestTextForLsp(const AManifestPath, AText, AProfileName: string;
   out ADiagnostics: TLspDiagnosticArray): Boolean;
 
@@ -105,7 +113,8 @@ function RunLspSyntaxAndSemanticCheck(const AContext: TNikWorkspaceContext;
 implementation
 
 uses
-  nik.platform, nik.paths, nik.fs, nik.sha256, nik.sdk.config, nik.sdk.manager,
+  StrUtils, nik.platform, nik.paths, nik.fs, nik.sha256, nik.sdk.config, nik.sdk.manager,
+  nik.test.discovery,
   nik.manifest.io, nik.manifest.resolve, nik.project,
   nik.pkg.types, nik.pkg.resolve, nikrun.lsp.utf16;
 
@@ -579,8 +588,8 @@ begin
   end;
 end;
 
-function ResolveLspWorkspace(const ARootDir, AManifestOverride, AProfileName: string;
-  out AContext: TNikWorkspaceContext; out AWarningMsg: string): Boolean;
+function ResolveLspWorkspaceCore(const ARootDir, AManifestOverride, AProfileName: string;
+  AForTest: Boolean; out AContext: TNikWorkspaceContext; out AWarningMsg: string): Boolean;
 var
   ManifestFile, EffProfile, CleanErr, FallbackHostVer: string;
   Parsed: TParsedManifest;
@@ -616,7 +625,7 @@ begin
       AContext.HasManifest := True;
       AContext.ManifestKind := Parsed.Kind;
 
-      ForTestFlag := (Parsed.Kind = mkPackage) and Parsed.HasTest;
+      ForTestFlag := AForTest or ((Parsed.Kind = mkPackage) and Parsed.HasTest);
 
       // Pre-validate manifest resolution (reports line-numbered missing entry / toolchain.fpc before SDK lookup)
       ResolvedCfg := ResolveManifestConfig(
@@ -714,7 +723,8 @@ begin
 
     AContext.CacheDir := JoinPath(
       JoinPath(JoinPath(AContext.ProjectDir, '.nik'), 'cache'),
-      SanitizeCacheKey(AContext.Sdk.Manifest.SdkId + '-' + AContext.ProfileName + '-lsp')
+      SanitizeCacheKey(AContext.Sdk.Manifest.SdkId + '-' + AContext.ProfileName + '-lsp' +
+        IfThen(AForTest, '-test', ''))
     );
     AContext.ConfigFingerprint := ComputeLspContextFingerprint(AContext);
     Result := FileExists(AContext.CompilerBinary);
@@ -726,6 +736,23 @@ begin
       Result := False;
     end;
   end;
+end;
+
+function ResolveLspWorkspace(const ARootDir, AManifestOverride, AProfileName: string;
+  out AContext: TNikWorkspaceContext; out AWarningMsg: string): Boolean;
+begin
+  Result := ResolveLspWorkspaceCore(ARootDir, AManifestOverride, AProfileName, False, AContext, AWarningMsg);
+end;
+
+function ResolveLspTestWorkspace(const ARootDir, AManifestOverride, AProfileName: string;
+  out AContext: TNikWorkspaceContext; out AWarningMsg: string): Boolean;
+begin
+  Result := ResolveLspWorkspaceCore(ARootDir, AManifestOverride, AProfileName, True, AContext, AWarningMsg);
+end;
+
+function IsLspTestDocument(const AFilePath: string): Boolean;
+begin
+  Result := IsTestUnitFileName(AFilePath);
 end;
 
 function MapSeverity(ASev: TDiagSeverity): TLspDiagnosticSeverity;

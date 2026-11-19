@@ -37,6 +37,9 @@ type
     FProfileName: string;
     FWorkspaceReady: Boolean;
     FWorkspace: TNikWorkspaceContext;
+    FTestWorkspaceTried: Boolean;
+    FTestWorkspaceReady: Boolean;
+    FTestWorkspace: TNikWorkspaceContext;
     FIndex: TNikSymbolIndex;
 
     FPublishedManifestUri: string;
@@ -55,6 +58,8 @@ type
     FPendingQueue: array of TNikQueuedValidation;
 
     procedure StopSdkIndexRefreshProcess;
+    function EnsureTestWorkspace: Boolean;
+    function ResolveCheckContext(const AFilePath: string): TNikWorkspaceContext;
     procedure MaybeStartBackgroundSdkIndexRefresh;
     procedure PollSdkIndexRefreshProcess;
 
@@ -535,6 +540,31 @@ begin
   end;
 end;
 
+function TNikPascalLspServer.EnsureTestWorkspace: Boolean;
+var
+  WarnMsg: string;
+begin
+  // Test documents (*_test.pas / *.test.pas) are analyzed against the 'test' overlay so test-only
+  // unit paths, defines and test.dependencies resolve without leaking into production code.
+  if not FTestWorkspaceTried then
+  begin
+    FTestWorkspaceTried := True;
+    FTestWorkspaceReady := ResolveLspTestWorkspace(DetermineWorkspaceRootDir, FManifestOverride,
+      FProfileName, FTestWorkspace, WarnMsg);
+    if FTestWorkspaceReady then
+      EnsureFreshLspCompilerCache(FTestWorkspace);
+  end;
+  Result := FTestWorkspaceReady;
+end;
+
+function TNikPascalLspServer.ResolveCheckContext(const AFilePath: string): TNikWorkspaceContext;
+begin
+  if IsLspTestDocument(AFilePath) and EnsureTestWorkspace then
+    Result := FTestWorkspace
+  else
+    Result := FWorkspace;
+end;
+
 procedure TNikPascalLspServer.StartNextQueuedCheck;
 var
   NextItem: TNikQueuedValidation;
@@ -552,7 +582,7 @@ begin
 
     try
       FActiveCheck := StartAsyncLspCompilerCheck(
-        FWorkspace,
+        ResolveCheckContext(NextItem.FilePath),
         ResolvePreferredClientUri(NextItem.NormalizedKey, NextItem.Uri),
         NextItem.FilePath,
         Documents
@@ -700,6 +730,8 @@ var
 begin
   FreeAndNil(FActiveCheck);
   RootDir := DetermineWorkspaceRootDir;
+  FTestWorkspaceTried := False;
+  FTestWorkspaceReady := False;
   FWorkspaceReady := ResolveLspWorkspace(RootDir, FManifestOverride, FProfileName, FWorkspace, WarnMsg);
   if FWorkspaceReady then
     EnsureFreshLspCompilerCache(FWorkspace);
@@ -905,6 +937,8 @@ begin
   FIndex.CloseOpenDocument(AUri, AFilePath);
   if FWorkspaceReady then
     SyncOpenDocumentsOverlay(FWorkspace, Documents, OverlayEntries);
+  if FTestWorkspaceReady then
+    SyncOpenDocumentsOverlay(FTestWorkspace, Documents, OverlayEntries);
 
   // Forget closed document's report, clear its diagnostics, and refresh dependent targets
   OtherTargets := TStringList.Create;
