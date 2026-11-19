@@ -10,6 +10,8 @@ uses
 procedure EnsureDirExists(const ADir: string);
 procedure CopyDirectoryRecursive(const ASrcDir, ADestDir: string);
 procedure MoveDirectoryAtomic(const ASrcDir, ADestDir: string);
+{ Renames ASrcFile over ADestFile in one step, replacing an existing file. }
+function ReplaceFileAtomic(const ASrcFile, ADestFile: string): Boolean;
 procedure DeleteDirectoryRecursive(const ADir: string);
 
 function StripUtf8Bom(const AText: string): string;
@@ -96,19 +98,39 @@ end;
 
 procedure MoveDirectoryAtomic(const ASrcDir, ADestDir: string);
 var
-  Attempt: Integer;
+  Attempt, OsError: Integer;
 begin
   // On Windows, real-time antivirus (Defender) briefly holds scan handles on newly
   // extracted .exe/.dll binaries, causing directory renames to transiently fail with
-  // ERROR_ACCESS_DENIED. Retry with short backoff before giving up.
+  // ERROR_ACCESS_DENIED or ERROR_SHARING_VIOLATION. Retry only those with a short backoff;
+  // every other failure (target exists, other volume, missing parent) is permanent.
+  OsError := 0;
   for Attempt := 1 to 25 do
   begin
     if RenameFile(ASrcDir, ADestDir) then
       Exit;
+    OsError := GetLastOSError;
+    {$IFDEF WINDOWS}
+    if (OsError <> 5) and (OsError <> 32) then
+      Break;
+    {$ELSE}
+    Break;
+    {$ENDIF}
     Sleep(100);
   end;
 
-  raise ENikError.CreateFmt('Failed to move directory from %s to %s.', [ASrcDir, ADestDir]);
+  raise ENikError.CreateFmt('Failed to move directory from %s to %s: %s',
+    [ASrcDir, ADestDir, SysErrorMessage(OsError)]);
+end;
+
+function ReplaceFileAtomic(const ASrcFile, ADestFile: string): Boolean;
+begin
+  {$IFDEF WINDOWS}
+  Result := MoveFileExW(PWideChar(UnicodeString(ASrcFile)), PWideChar(UnicodeString(ADestFile)),
+    MOVEFILE_REPLACE_EXISTING or MOVEFILE_WRITE_THROUGH);
+  {$ELSE}
+  Result := fpRename(ASrcFile, ADestFile) = 0;
+  {$ENDIF}
 end;
 
 {$PUSH}
@@ -135,6 +157,17 @@ begin
 
         if IsDir then
           DeleteDirectoryRecursive(FullEntry)
+        else if IsSymLink and ((Rec.Attr and faDirectory) <> 0) then
+        begin
+          // A directory symlink or junction is removed itself, never followed. On Windows
+          // DeleteFile cannot remove it; RemoveDir deletes only the link.
+          {$IFDEF WINDOWS}
+          if not RemoveDir(FullEntry) then
+          {$ELSE}
+          if fpUnlink(FullEntry) <> 0 then
+          {$ENDIF}
+            raise ENikError.CreateFmt('Failed to remove directory link: %s', [FullEntry]);
+        end
         else
         begin
           {$IFDEF WINDOWS}
@@ -196,14 +229,47 @@ end;
 procedure WriteFileTextUtf8(const AFilePath, AContent: string);
 var
   FS: TFileStream;
+  TempPath: string;
+  Attempt: Integer;
+  Replaced: Boolean;
 begin
   EnsureDirExists(ExtractFileDir(AFilePath));
-  FS := TFileStream.Create(AFilePath, fmCreate);
+
+  // Write next to the target and swap it in with one rename, so an interrupted run or a
+  // concurrent reader never sees a truncated nik.lock, config or manifest.
+  TempPath := Format('%s.%d.tmp', [AFilePath, GetProcessID]);
+  FS := TFileStream.Create(TempPath, fmCreate);
   try
-    if Length(AContent) > 0 then
-      FS.WriteBuffer(AContent[1], Length(AContent));
+    try
+      if Length(AContent) > 0 then
+        FS.WriteBuffer(AContent[1], Length(AContent));
+    finally
+      FS.Free;
+    end;
+
+    Replaced := False;
+    for Attempt := 1 to 20 do
+    begin
+      Replaced := ReplaceFileAtomic(TempPath, AFilePath);
+      if Replaced then
+        Break;
+      Sleep(50);
+    end;
+
+    if not Replaced then
+    begin
+      // The target stays locked (for example by a reader): fall back to overwriting in place.
+      FS := TFileStream.Create(AFilePath, fmCreate);
+      try
+        if Length(AContent) > 0 then
+          FS.WriteBuffer(AContent[1], Length(AContent));
+      finally
+        FS.Free;
+      end;
+    end;
   finally
-    FS.Free;
+    if FileExists(TempPath) then
+      SysUtils.DeleteFile(TempPath);
   end;
 end;
 

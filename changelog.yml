@@ -9,6 +9,8 @@ changelog:
         - 'Reject YAML anchors, aliases and tags in `nik.yaml` with a clear error (quote the value to use it literally) and accept only plain decimal integers for numeric fields'
       deprecated: []
       fixed:
+        - 'Write `nik.lock`, config and manifest files by renaming a finished temporary file over the target, so an interrupted run or a concurrent reader never sees a truncated file'
+        - 'Report a permanent directory-move failure at once with the operating-system reason instead of retrying 25 times, and remove Windows junctions and directory symlinks inside a deleted tree as links instead of failing on them'
         - 'Keep the `nik.lock` entries of other targets, including their transitive packages, when `nik build` rewrites the lock for the active target, so `--locked` builds on another OS no longer fail after a local build'
         - 'Verify a commit-pinned dependency against the integrity recorded in `nik.lock` during `nik pkg update` instead of silently overwriting it'
         - 'Reject project names with path separators, `..`, drive colons or wildcards in `nik init` and in `nik.yaml` (a program named `../../x` wrote its binary outside the project), check the name before the SDK lookup, create the project directory only after validation, and never generate a program or unit whose identifier is a reserved word or hides a standard unit (`types`, `math`, `classes`, ...)'

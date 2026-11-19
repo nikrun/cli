@@ -6,7 +6,8 @@ program nik_unit_tests;
   which compiles this program with heaptrc and fails on any unfreed memory block. }
 
 uses
-  SysUtils, Classes,
+  SysUtils, Classes, Process,
+  {$IFDEF UNIX}BaseUnix,{$ENDIF}
   nik.types,
   nik.fs,
   nik.paths,
@@ -605,6 +606,132 @@ begin
   CheckEqStr(DeriveStarterIdentifier(mkProgram, '1st app'), 'Project1stApp', 'leading digit');
 end;
 
+{ ---- nik.fs: atomic writes, permanent move failures, directory links ---- }
+
+var
+  GMoveSrc, GMoveDest: string;
+
+procedure DoMoveDirectory;
+begin
+  MoveDirectoryAtomic(GMoveSrc, GMoveDest);
+end;
+
+function NewTempTestDir(const APrefix: string): string;
+begin
+  Result := IncludeTrailingPathDelimiter(GetTempDir(False)) + Format('%s-%d', [APrefix, GetProcessID]);
+  DeleteDirectoryRecursive(Result);
+  EnsureDirExists(Result);
+end;
+
+function CountDirectoryEntries(const ADir: string): Integer;
+var
+  Rec: TSearchRec;
+begin
+  Result := 0;
+  if FindFirst(IncludeTrailingPathDelimiter(ADir) + '*', faAnyFile, Rec) = 0 then
+  begin
+    repeat
+      if (Rec.Name <> '.') and (Rec.Name <> '..') then
+        Inc(Result);
+    until FindNext(Rec) <> 0;
+    FindClose(Rec);
+  end;
+end;
+
+procedure TestWriteFileReplacesAtomically;
+var
+  Dir, Target: string;
+begin
+  Dir := NewTempTestDir('nik-unit-write');
+  try
+    Target := JoinPath(Dir, 'config.json');
+    WriteFileTextUtf8(Target, 'first');
+    WriteFileTextUtf8(Target, 'second and longer');
+    CheckEqStr(ReadFileTextUtf8(Target), 'second and longer', 'second write replaces the content');
+    WriteFileTextUtf8(Target, 'x');
+    CheckEqStr(ReadFileTextUtf8(Target), 'x', 'a shorter write leaves nothing of the old content');
+    WriteFileTextUtf8(Target, '');
+    CheckEqStr(ReadFileTextUtf8(Target), '', 'an empty write empties the file');
+    Check(CountDirectoryEntries(Dir) = 1, 'no temporary file is left behind');
+    WriteFileTextUtf8(JoinPath(JoinPath(Dir, 'sub'), 'new.txt'), 'in a new directory');
+    CheckEqStr(ReadFileTextUtf8(JoinPath(JoinPath(Dir, 'sub'), 'new.txt')), 'in a new directory', 'missing directories are created');
+  finally
+    DeleteDirectoryRecursive(Dir);
+  end;
+end;
+
+procedure TestMoveDirectoryFailsFastOnPermanentErrors;
+var
+  Dir: string;
+  Started: QWord;
+begin
+  Dir := NewTempTestDir('nik-unit-move');
+  try
+    GMoveSrc := JoinPath(Dir, 'src');
+    GMoveDest := JoinPath(Dir, 'dest');
+    EnsureDirExists(GMoveSrc);
+    EnsureDirExists(GMoveDest);
+    WriteFileTextUtf8(JoinPath(GMoveSrc, 'a.txt'), 'a');
+    WriteFileTextUtf8(JoinPath(GMoveDest, 'b.txt'), 'b');
+
+    Started := GetTickCount64;
+    // The destination exists and is not empty: retrying cannot help, so the error must come at once
+    // and carry the reason from the operating system.
+    CheckEnikError('Failed to move directory', 'move onto an existing directory', @DoMoveDirectory);
+    Check(GetTickCount64 - Started < 1500, 'a permanent move failure is reported without retrying for seconds');
+
+    DeleteDirectoryRecursive(GMoveDest);
+    MoveDirectoryAtomic(GMoveSrc, GMoveDest);
+    Check(FileExists(JoinPath(GMoveDest, 'a.txt')) and (not DirectoryExists(GMoveSrc)), 'a normal move still works');
+  finally
+    DeleteDirectoryRecursive(Dir);
+  end;
+end;
+
+procedure TestDeleteDoesNotFollowDirectoryLinks;
+var
+  Dir, Root, Victim, Link: string;
+  Proc: TProcess;
+begin
+  Dir := NewTempTestDir('nik-unit-link');
+  try
+    Root := JoinPath(Dir, 'root');
+    Victim := JoinPath(Dir, 'victim');
+    Link := JoinPath(Root, 'link');
+    EnsureDirExists(Root);
+    EnsureDirExists(Victim);
+    WriteFileTextUtf8(JoinPath(Victim, 'keep.txt'), 'keep me');
+    WriteFileTextUtf8(JoinPath(Root, 'own.txt'), 'own');
+
+    {$IFDEF WINDOWS}
+    Proc := TProcess.Create(nil);
+    try
+      Proc.Executable := 'cmd.exe';
+      Proc.Parameters.Add('/c');
+      Proc.Parameters.Add('mklink');
+      Proc.Parameters.Add('/J');
+      Proc.Parameters.Add(Link);
+      Proc.Parameters.Add(Victim);
+      Proc.Options := [poWaitOnExit, poNoConsole];
+      Proc.Execute;
+      Check(Proc.ExitStatus = 0, 'junction was created');
+    finally
+      Proc.Free;
+    end;
+    {$ELSE}
+    Proc := nil;
+    Check(fpSymlink(PChar(Victim), PChar(Link)) = 0, 'directory symlink was created');
+    {$ENDIF}
+
+    Check(DirectoryExists(Link), 'the link resolves to the victim directory');
+    DeleteDirectoryRecursive(Root);
+    Check(not DirectoryExists(Root), 'the tree with the link is removed');
+    Check(FileExists(JoinPath(Victim, 'keep.txt')), 'the link target and its files are not touched');
+  finally
+    DeleteDirectoryRecursive(Dir);
+  end;
+end;
+
 { ---- runner ---- }
 
 procedure RunTest(const AName: string; AProc: TTestProc);
@@ -629,6 +756,9 @@ begin
     RunTest('manifest: name rules', @TestManifestNameRules);
     RunTest('manifest: unsafe names are rejected', @TestManifestRejectsUnsafeName);
     RunTest('init: starter identifiers', @TestStarterIdentifiers);
+    RunTest('fs: writes replace files atomically', @TestWriteFileReplacesAtomically);
+    RunTest('fs: permanent move failures are immediate', @TestMoveDirectoryFailsFastOnPermanentErrors);
+    RunTest('fs: deleting a tree never follows directory links', @TestDeleteDoesNotFollowDirectoryLinks);
     RunTest('paths: safe segments and relative paths', @TestSafePathHelpers);
     RunTest('sdk: index rejects unsafe names', @TestSdkIndexRejectsUnsafeNames);
     RunTest('sdk: remote entries need a checksum', @TestRemoteEntryNeedsChecksum);
