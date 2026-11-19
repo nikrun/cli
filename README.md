@@ -203,13 +203,16 @@ cli/
 │   ├── nik.lsp.manifest.pas     # Built-in nik.yaml LSP intelligence (Hover, SDK/path/key Completion, Outline & Go-to-Def)
 │   ├── nik.lsp.server.pas       # TNikPascalLspServer binding nikrun.lsp.server to Nikrun SDKs
 │   └── nik.cmd.lsp.pas          # `nik lsp` CLI parser (--stdio, --socket, --profile, --log-file)
+├── tests/
+│   └── nik_unit_tests.pas       # Unit tests for the `nik` core units (YAML, lockfile, ...)
 ├── vendor/
 │   └── lazarus/                 # Shallow Lazarus submodule providing CodeTools & LazUtils
 ├── version.txt                  # Single source of truth SemVer (e.g. 0.1.0)
 ├── changelog.yml                # Structured Keep-a-Changelog release history
 ├── prepare.ps1                  # Provisions & verifies newest prebuilt Nikrun FPC SDK from nikrun/sdk
 ├── build.ps1                    # Compiles, tests & packages nik-<versionTag>-<triplet>.zip + manifest.json
-└── test.ps1                     # End-to-end integration test suite + nikrun-lsp-protocol unit tests
+├── test-units.ps1               # Compiles & runs tests/nik_unit_tests.pas with heaptrc leak checking
+└── test.ps1                     # End-to-end integration test suite
 ```
 
 ---
@@ -230,7 +233,10 @@ git submodule update --init --recursive --depth 1
 # 4. Build optimized release binary and install into ~/.nikrun/bin
 .\build.ps1 -Profile release -Install -RunTests:$false
 
-# 5. Run full end-to-end CLI & LSP test suite standalone
+# 5. Run the `nik` core unit tests (with heaptrc leak check) standalone
+.\test-units.ps1
+
+# 6. Run full end-to-end CLI & LSP test suite standalone
 .\test.ps1
 ```
 

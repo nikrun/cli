@@ -23,7 +23,8 @@ uses
   nik.manifest.types,
   nik.manifest.io,
   nik.manifest.resolve,
-  nik.pkg.types;
+  nik.pkg.types,
+  nik.yaml;
 
 procedure PrintInitHelp;
 begin
@@ -146,27 +147,10 @@ begin
 end;
 
 function FormatYamlScalar(const S: string; AForceQuote: Boolean = False): string;
-var
-  I: Integer;
-  Escaped: string;
 begin
   if (not AForceQuote) and (not NeedsYamlQuoting(S)) then
     Exit(S);
-
-  Escaped := '';
-  for I := 1 to Length(S) do
-  begin
-    case S[I] of
-      '\': Escaped := Escaped + '\\';
-      '"': Escaped := Escaped + '\"';
-      #10: Escaped := Escaped + '\n';
-      #13: Escaped := Escaped + '\r';
-      #9:  Escaped := Escaped + '\t';
-    else
-      Escaped := Escaped + S[I];
-    end;
-  end;
-  Result := '"' + Escaped + '"';
+  Result := YamlQuoteDouble(S);
 end;
 
 function FormatYamlBool(B: Boolean): string;

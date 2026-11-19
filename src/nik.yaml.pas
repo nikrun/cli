@@ -57,6 +57,12 @@ type
 function ParseYamlText(const AText: string; const ASourceName: string = 'nik.yaml'): TYamlNode;
 function ParseYamlFile(const AFilePath: string): TYamlNode;
 
+{ True when AValue can be written as an unquoted block scalar (`key: value`) and
+  ParseYamlText reads exactly AValue back. }
+function YamlPlainScalarSafe(const AValue: string): Boolean;
+{ Writes AValue as a double-quoted scalar that ParseYamlText reads back unchanged. }
+function YamlQuoteDouble(const AValue: string): string;
+
 implementation
 
 uses
@@ -211,16 +217,53 @@ end;
 
 function TYamlNode.AsInteger(out AVal: Integer): Boolean;
 var
-  Code: Integer;
+  Code, I, Start: Integer;
+  Text: string;
 begin
   Result := False;
   if (FKind <> ynkScalar) or FQuoted then
     Exit;
-  Val(Trim(FScalarValue), AVal, Code);
+  // Plain decimal integers only: Val would also accept '$FF', '&17', '%101' and '0x1'.
+  Text := Trim(FScalarValue);
+  Start := 1;
+  if (Text <> '') and ((Text[1] = '-') or (Text[1] = '+')) then
+    Start := 2;
+  if Start > Length(Text) then
+    Exit;
+  for I := Start to Length(Text) do
+    if (Text[I] < '0') or (Text[I] > '9') then
+      Exit;
+  Val(Text, AVal, Code);
   Result := (Code = 0);
 end;
 
 { Lexing & Scalar Helpers }
+
+// A quote character opens a quoted scalar only where a scalar can start: at the
+// beginning of the text or after a structural indicator ('- ', ': ', ',', '[', '{').
+// Inside a plain scalar such as "Don't panic" it is an ordinary character.
+function QuoteStartsScalar(const S: string; APos: Integer): Boolean;
+var
+  J: Integer;
+  SawBlank: Boolean;
+begin
+  J := APos - 1;
+  SawBlank := False;
+  while (J >= 1) and ((S[J] = ' ') or (S[J] = #9)) do
+  begin
+    Dec(J);
+    SawBlank := True;
+  end;
+  if J < 1 then
+    Exit(True);
+  case S[J] of
+    ',', '[', '{': Result := True;
+    ':': Result := SawBlank;
+    '-': Result := (J = 1) and SawBlank;
+  else
+    Result := False;
+  end;
+end;
 
 function StripInlineComment(const S: string; ALineNo: Integer; const ASourceName: string): string;
 var
@@ -254,9 +297,9 @@ begin
     end
     else
     begin
-      if Ch = '''' then
+      if (Ch = '''') and QuoteStartsScalar(S, I) then
         InSingle := True
-      else if Ch = '"' then
+      else if (Ch = '"') and QuoteStartsScalar(S, I) then
         InDouble := True
       else if (Ch = '#') and ((I = 1) or (S[I - 1] = ' ') or (S[I - 1] = #9)) then
         Exit(TrimRight(Copy(S, 1, I - 1)));
@@ -328,6 +371,10 @@ begin
     Exit(TYamlNode.CreateScalar(StringReplace(Copy(S, 2, Len - 2), '''''', '''', [rfReplaceAll]), True, ALineNo));
   end;
 
+  if (S[1] = '&') or (S[1] = '*') or (S[1] = '!') then
+    RaiseYamlError(ASourceName, ALineNo,
+      Format('YAML anchors, aliases and tags are not supported (''%s''); quote the value to use it literally.', [S]));
+
   Lower := LowerCase(S);
   if (Lower = 'null') or (Lower = '~') then
     Exit(TYamlNode.CreateNull(ALineNo));
@@ -386,9 +433,9 @@ begin
     end
     else
     begin
-      if Ch = '''' then
+      if (Ch = '''') and QuoteStartsScalar(AText, I) then
         InSingle := True
-      else if Ch = '"' then
+      else if (Ch = '"') and QuoteStartsScalar(AText, I) then
         InDouble := True
       else if Ch = '[' then
         Inc(DepthBracket)
@@ -410,7 +457,11 @@ begin
   end;
 end;
 
-function ParseFlowNode(const AText: string; ALineNo: Integer; const ASourceName: string): TYamlNode; forward;
+const
+  MAX_FLOW_DEPTH = 64;
+
+function ParseFlowNodeAt(const AText: string; ALineNo: Integer; const ASourceName: string;
+  ADepth: Integer): TYamlNode; forward;
 
 function SplitFlowItems(const AInner: string; ALineNo: Integer; const ASourceName: string): TStringArray;
 var
@@ -454,9 +505,9 @@ begin
     end
     else
     begin
-      if Ch = '''' then
+      if (Ch = '''') and QuoteStartsScalar(AInner, I) then
         InSingle := True
-      else if Ch = '"' then
+      else if (Ch = '"') and QuoteStartsScalar(AInner, I) then
         InDouble := True
       else if Ch = '[' then
         Inc(DepthBracket)
@@ -500,12 +551,16 @@ begin
   end;
 end;
 
-function ParseFlowNode(const AText: string; ALineNo: Integer; const ASourceName: string): TYamlNode;
+function ParseFlowNodeAt(const AText: string; ALineNo: Integer; const ASourceName: string;
+  ADepth: Integer): TYamlNode;
 var
   S, RawKey, RawVal: string;
   Len, I: Integer;
   Parts: TStringArray;
 begin
+  if ADepth > MAX_FLOW_DEPTH then
+    RaiseYamlError(ASourceName, ALineNo, 'Flow collection is nested too deeply.');
+
   S := Trim(AText);
   Len := Length(S);
 
@@ -515,7 +570,7 @@ begin
     try
       Parts := SplitFlowItems(Copy(S, 2, Len - 2), ALineNo, ASourceName);
       for I := 0 to High(Parts) do
-        Result.AddItem(ParseFlowNode(Parts[I], ALineNo, ASourceName));
+        Result.AddItem(ParseFlowNodeAt(Parts[I], ALineNo, ASourceName, ADepth + 1));
     except
       Result.Free;
       raise;
@@ -533,7 +588,7 @@ begin
         if not SplitKeyValue(Parts[I], RawKey, RawVal) then
           RaiseYamlError(ASourceName, ALineNo, Format('Invalid entry ''%s'' in flow mapping (expected key: value).', [Parts[I]]));
         Result.AddEntry(UnquoteKey(RawKey, ALineNo, ASourceName), ALineNo,
-          ParseFlowNode(RawVal, ALineNo, ASourceName), ASourceName);
+          ParseFlowNodeAt(RawVal, ALineNo, ASourceName, ADepth + 1), ASourceName);
       end;
     except
       Result.Free;
@@ -546,6 +601,11 @@ begin
     RaiseYamlError(ASourceName, ALineNo, 'Unclosed inline collection (keep [..] or {..} on a single line or use block indentation).');
 
   Result := ParseScalarNode(S, ALineNo, ASourceName);
+end;
+
+function ParseFlowNode(const AText: string; ALineNo: Integer; const ASourceName: string): TYamlNode;
+begin
+  Result := ParseFlowNodeAt(AText, ALineNo, ASourceName, 0);
 end;
 
 function IsSequenceLine(const AContent: string; out ARest: string): Boolean;
@@ -590,7 +650,16 @@ begin
         Inc(Indent);
 
       if (Indent < Length(RawLine)) and (RawLine[Indent + 1] = #9) then
+      begin
+        // Blank lines and comment-only lines may carry tabs; only real content may not be tab-indented.
+        Stripped := Trim(RawLine);
+        if (Stripped = '') or (Stripped[1] = '#') then
+        begin
+          Inc(I);
+          Continue;
+        end;
         RaiseYamlError(ASourceName, LineNo, 'Tab characters are not allowed for YAML indentation; use spaces.');
+      end;
 
       Stripped := StripInlineComment(Copy(RawLine, Indent + 1, MaxInt), LineNo, ASourceName);
       if Stripped = '' then
@@ -788,6 +857,59 @@ end;
 function ParseYamlFile(const AFilePath: string): TYamlNode;
 begin
   Result := ParseYamlText(ReadFileTextUtf8(AFilePath), AFilePath);
+end;
+
+function YamlPlainScalarSafe(const AValue: string): Boolean;
+var
+  I: Integer;
+  Lower: string;
+begin
+  Result := False;
+  if AValue = '' then
+    Exit;
+  if (AValue[1] = ' ') or (AValue[1] = #9) or
+     (AValue[Length(AValue)] = ' ') or (AValue[Length(AValue)] = #9) then
+    Exit;
+  // Characters that start a quoted scalar, a flow collection, a comment, an anchor, alias,
+  // tag, block scalar, directive, or a reserved indicator.
+  if AValue[1] in ['''', '"', '[', ']', '{', '}', '#', '&', '*', '!', '|', '>', '%', '@', '`', ',', '?'] then
+    Exit;
+  // '-' and ':' only start an indicator when followed by a blank (or when alone).
+  if (AValue[1] = '-') and ((Length(AValue) = 1) or (AValue[2] = ' ') or (AValue[2] = #9)) then
+    Exit;
+  if (AValue[1] = ':') and ((Length(AValue) = 1) or (AValue[2] = ' ') or (AValue[2] = #9)) then
+    Exit;
+  if (Pos(' #', AValue) > 0) or (Pos(#9'#', AValue) > 0) or (Pos(': ', AValue) > 0) or
+     (Pos(':'#9, AValue) > 0) or (AValue[Length(AValue)] = ':') then
+    Exit;
+  for I := 1 to Length(AValue) do
+    if AValue[I] < #32 then
+      Exit;
+  Lower := LowerCase(AValue);
+  if (Lower = 'null') or (Lower = '~') then
+    Exit;
+  Result := True;
+end;
+
+function YamlQuoteDouble(const AValue: string): string;
+var
+  I: Integer;
+begin
+  Result := '';
+  for I := 1 to Length(AValue) do
+  begin
+    case AValue[I] of
+      '\': Result := Result + '\\';
+      '"': Result := Result + '\"';
+      #10: Result := Result + '\n';
+      #13: Result := Result + '\r';
+      #9:  Result := Result + '\t';
+      #0:  Result := Result + '\0';
+    else
+      Result := Result + AValue[I];
+    end;
+  end;
+  Result := '"' + Result + '"';
 end;
 
 end.

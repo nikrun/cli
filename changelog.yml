@@ -5,9 +5,12 @@ changelog:
         - 'Automatically download, SHA-256-verify, and configure missing Free Pascal SDKs on `nik build` (unless `--offline` is set), with `toolchain.sdkInstalled` reporting in `nik build --json`'
         - 'Display installed SDK directory sizes and total disk usage in `nik sdk list` and `nik sdk info`, including `sizeBytes` and `totalSizeBytes` in `--json` output'
         - 'Add built-in `nik.yaml` manifest intelligence to `nik lsp` (`Hover` with `ppc*` flag explanations and live SDK/`nik.lock` status, context-aware key/enum/path `Completion`, dynamic `toolchain.fpc` suggestions combining installed and cached online SDKs, `DocumentSymbol` outline, and `Go to Definition`)'
-      changed: []
+      changed:
+        - 'Reject YAML anchors, aliases and tags in `nik.yaml` with a clear error (quote the value to use it literally) and accept only plain decimal integers for numeric fields'
       deprecated: []
-      fixed: []
+      fixed:
+        - 'Parse apostrophes and double quotes inside unquoted `nik.yaml` values (for example `description: Don''t panic`) and write `nik.lock` entries with quotes, indicators or `null` so the file always reads back'
+        - 'Accept blank and comment-only lines that contain tabs in `nik.yaml`, and bound the nesting depth of flow collections instead of overflowing the stack'
       removed: []
       security: []
   - version: 0.1.0

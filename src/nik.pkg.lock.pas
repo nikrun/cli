@@ -339,29 +339,11 @@ begin
 end;
 
 function QuoteYamlScalarIfNeeded(const S: string): string;
-var
-  I: Integer;
-  NeedsQuote: Boolean;
 begin
-  if S = '' then
-    Exit('""');
-
-  NeedsQuote := (S[1] = ' ') or (S[Length(S)] = ' ') or
-                (S[1] = '@') or (S[1] = '&') or (S[1] = '*') or
-                (S[1] = '{') or (S[1] = '[') or (S[1] = '''') or (S[1] = '"') or
-                (Pos(' #', S) > 0) or (Pos(': ', S) > 0);
-  if not NeedsQuote then
-    for I := 1 to Length(S) do
-      if (S[I] = #10) or (S[I] = #13) or (S[I] = #9) then
-      begin
-        NeedsQuote := True;
-        Break;
-      end;
-
-  if NeedsQuote then
-    Result := '"' + StringReplace(StringReplace(S, '\', '\\', [rfReplaceAll]), '"', '\"', [rfReplaceAll]) + '"'
+  if YamlPlainScalarSafe(S) then
+    Result := S
   else
-    Result := S;
+    Result := YamlQuoteDouble(S);
 end;
 
 function FormatLockFileText(const APackages: TLockedPackageArray): string;
