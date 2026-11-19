@@ -13,7 +13,7 @@ procedure PrintSdkHelp;
 implementation
 
 uses
-  fpjson, nik.types, nik.paths, nik.term, nik.sdk.manager;
+  fpjson, nik.types, nik.paths, nik.fs, nik.term, nik.sdk.manager;
 
 procedure PrintSdkHelp;
 begin
@@ -174,8 +174,10 @@ end;
 function HandleListLocal(const AVersionFilter, AOsFilter, AArchFilter: string; AJson: Boolean): Integer;
 var
   AllInstalled, Filtered: TInstalledSdkArray;
-  I, Count, WVersion, WTarget, WCommit: Integer;
-  CommitStr: string;
+  Sizes: array of Int64;
+  TotalSizeBytes: Int64;
+  I, Count, WVersion, WTarget, WCommit, WSize: Integer;
+  CommitStr, SizeStr, SdkLabel: string;
   Root: TJSONObject;
   Arr: TJSONArray;
   ItemObj: TJSONObject;
@@ -183,6 +185,8 @@ begin
   Result := 0;
   AllInstalled := ListInstalledSdks;
   Filtered := nil;
+  Sizes := nil;
+  TotalSizeBytes := 0;
   Count := 0;
 
   for I := 0 to High(AllInstalled) do
@@ -199,12 +203,20 @@ begin
     Inc(Count);
   end;
 
+  SetLength(Sizes, Length(Filtered));
+  for I := 0 to High(Filtered) do
+  begin
+    Sizes[I] := GetDirectorySizeSafe(Filtered[I].InstallPath);
+    Inc(TotalSizeBytes, Sizes[I]);
+  end;
+
   if AJson then
   begin
     Root := TJSONObject.Create;
     Arr := TJSONArray.Create;
     try
       Root.Add('nikrunHome', GetNikrunHomeDir);
+      Root.Add('totalSizeBytes', TotalSizeBytes);
       for I := 0 to High(Filtered) do
       begin
         ItemObj := TJSONObject.Create;
@@ -217,6 +229,7 @@ begin
         ItemObj.Add('targetTriplet', Filtered[I].Manifest.TargetTriplet);
         ItemObj.Add('builtAtUtc', Filtered[I].Manifest.BuiltAtUtc);
         ItemObj.Add('installPath', Filtered[I].InstallPath);
+        ItemObj.Add('sizeBytes', Sizes[I]);
         Arr.Add(ItemObj);
       end;
       Root.Add('sdks', Arr);
@@ -238,30 +251,44 @@ begin
   WVersion := Length('VERSION');
   WTarget  := Length('TARGET');
   WCommit  := Length('COMMIT');
+  WSize    := Length('SIZE');
 
   for I := 0 to High(Filtered) do
   begin
     CommitStr := ShortCommitStr(Filtered[I].Manifest.GitCommit);
+    SizeStr   := FormatByteSize(Sizes[I]);
     WVersion  := MaxIntVal(WVersion, Length(Filtered[I].Manifest.FpcVersion));
     WTarget   := MaxIntVal(WTarget, Length(Filtered[I].Manifest.TargetTriplet));
     WCommit   := MaxIntVal(WCommit, Length(CommitStr));
+    WSize     := MaxIntVal(WSize, Length(SizeStr));
   end;
 
   WriteLn(StyleBold(
     PadRightStr('VERSION', WVersion + 2) +
     PadRightStr('TARGET', WTarget + 2) +
     PadRightStr('COMMIT', WCommit + 2) +
+    PadRightStr('SIZE', WSize + 2) +
     'PATH'));
 
   for I := 0 to High(Filtered) do
   begin
     CommitStr := ShortCommitStr(Filtered[I].Manifest.GitCommit);
+    SizeStr   := FormatByteSize(Sizes[I]);
     WriteLn(
       PadRightStr(Filtered[I].Manifest.FpcVersion, WVersion + 2) +
       PadRightStr(Filtered[I].Manifest.TargetTriplet, WTarget + 2) +
       StyleDim(PadRightStr(CommitStr, WCommit + 2)) +
+      PadRightStr(SizeStr, WSize + 2) +
       StyleDim(Filtered[I].InstallPath));
   end;
+
+  if Length(Filtered) = 1 then
+    SdkLabel := 'SDK'
+  else
+    SdkLabel := 'SDKs';
+  WriteLn;
+  WriteLn(StyleDim(Format('%d %s installed (%s total)',
+    [Length(Filtered), SdkLabel, FormatByteSize(TotalSizeBytes)])));
 end;
 
 function HandleListRemote(const AVersionFilter, AOsFilter, AArchFilter, AIndexUrl: string;
@@ -704,6 +731,7 @@ var
   Arg, Val, Version, TargetOs, TargetCpu: string;
   IsJson: Boolean;
   Sdk: TInstalledSdk;
+  SdkSizeBytes: Int64;
   FpcBin, PpcBin, BinDir, FpcCfg, UnitsDir, RtlDir, PkgDir: string;
   Root, PathsObj: TJSONObject;
 begin
@@ -744,6 +772,7 @@ begin
     raise ENikError.Create('Missing Free Pascal SDK version. Example: ''nik sdk info 3.2.2''.');
 
   Sdk := RequireInstalledSdkForTarget(Version, BuildTargetTripletFilter(TargetOs, TargetCpu));
+  SdkSizeBytes := GetDirectorySizeSafe(Sdk.InstallPath);
   BinDir   := JoinPath(Sdk.InstallPath, Sdk.Manifest.Paths.BinDir);
   FpcBin   := JoinPath(Sdk.InstallPath, Sdk.Manifest.Paths.FpcBinary);
   PpcBin   := JoinPath(Sdk.InstallPath, Sdk.Manifest.Paths.PpcBinary);
@@ -766,6 +795,7 @@ begin
       Root.Add('targetTriplet', Sdk.Manifest.TargetTriplet);
       Root.Add('builtAtUtc', Sdk.Manifest.BuiltAtUtc);
       Root.Add('installPath', Sdk.InstallPath);
+      Root.Add('sizeBytes', SdkSizeBytes);
 
       PathsObj.Add('binDir', BinDir);
       PathsObj.Add('fpcBinary', FpcBin);
@@ -796,6 +826,7 @@ begin
     WriteLn('  Git Commit      : ', Sdk.Manifest.GitCommit);
   if Sdk.Manifest.BuiltAtUtc <> '' then
     WriteLn('  Built At (UTC)  : ', Sdk.Manifest.BuiltAtUtc);
+  WriteLn('  Install Size    : ', FormatByteSize(SdkSizeBytes));
   WriteLn('  Install Path    : ', FormatPathStatus(Sdk.InstallPath, True));
   WriteLn('  Compiler Binary : ', FormatPathStatus(FpcBin, False));
   WriteLn('  Compiler Config : ', FormatPathStatus(FpcCfg, False));

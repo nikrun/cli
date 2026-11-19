@@ -3,6 +3,7 @@ changelog:
     changes:
       added:
         - 'Automatically download, SHA-256-verify, and configure missing Free Pascal SDKs on `nik build` (unless `--offline` is set), with `toolchain.sdkInstalled` reporting in `nik build --json`'
+        - 'Display installed SDK directory sizes and total disk usage in `nik sdk list` and `nik sdk info`, including `sizeBytes` and `totalSizeBytes` in `--json` output'
       changed: []
       deprecated: []
       fixed: []

@@ -399,7 +399,7 @@ try {
 
     # 2. Empty local list & verify nik sdk default is removed
     $emptyJson = (Invoke-Nik -NikHome $TestHome -Arguments @('sdk', 'list', '--json')).Output | ConvertFrom-Json
-    Assert-True ($null -eq $emptyJson.PSObject.Properties['defaultSdkId'] -and $emptyJson.sdks.Count -eq 0) 'nik sdk list --json reports empty state without defaultSdkId'
+    Assert-True ($null -eq $emptyJson.PSObject.Properties['defaultSdkId'] -and $emptyJson.sdks.Count -eq 0 -and $emptyJson.totalSizeBytes -eq 0) 'nik sdk list --json reports empty state with totalSizeBytes = 0 and without defaultSdkId'
 
     $removedDef = Invoke-Nik -NikHome $TestHome -Arguments @('sdk', 'default') -AllowFailure
     Assert-True ($removedDef.ExitCode -ne 0 -and $removedDef.Output -match "Unknown sdk subcommand 'default'") 'nik sdk default subcommand is removed cleanly'
@@ -447,10 +447,13 @@ try {
     Assert-True ($listTwoRaw -notmatch "[\r\n\t]" -and $listTwoRaw -match '^\{"nikrunHome":"') 'Non-interactive --json output is emitted as compact single-line JSON without newlines or indentation'
     $listTwo = $listTwoRaw | ConvertFrom-Json
     Assert-True ($listTwo.sdks.Count -eq 2 -and $null -eq $listTwo.PSObject.Properties['defaultSdkId'] -and $null -eq $listTwo.sdks[0].PSObject.Properties['default']) 'nik sdk list --json lists both installed SDKs cleanly without default properties'
+    Assert-True ($listTwo.sdks[0].sizeBytes -gt 0 -and $listTwo.sdks[1].sizeBytes -gt 0 -and $listTwo.totalSizeBytes -eq ($listTwo.sdks[0].sizeBytes + $listTwo.sdks[1].sizeBytes)) 'nik sdk list --json reports positive sizeBytes per SDK and accurate totalSizeBytes'
 
-    # 7b. Human table layout checks (VERSION TARGET COMMIT PATH & INSTALLED commit column)
+    # 7b. Human table layout checks (VERSION TARGET COMMIT SIZE PATH, total summary & INSTALLED commit column)
     $localHuman = (Invoke-Nik -NikHome $TestHome -Arguments @('sdk', 'list')).Output
-    Assert-True ($localHuman -match '(?m)^VERSION\s+TARGET\s+COMMIT\s+PATH\r?$' -and $localHuman -match '0d122c49' -and $localHuman -cnotmatch 'DEFAULT' -and $localHuman -cnotmatch 'SDK ID') 'nik sdk list displays VERSION TARGET COMMIT PATH header without DEFAULT or SDK ID'
+    Assert-True ($localHuman -match '(?m)^VERSION\s+TARGET\s+COMMIT\s+SIZE\s+PATH\r?$' -and $localHuman -match '0d122c49' -and $localHuman -match '(?m)^2 SDKs installed \(.+ total\)\r?$' -and $localHuman -cnotmatch 'DEFAULT' -and $localHuman -cnotmatch 'SDK ID') 'nik sdk list displays VERSION TARGET COMMIT SIZE PATH header and total size summary without DEFAULT or SDK ID'
+    $localOneHuman = (Invoke-Nik -NikHome $TestHome -Arguments @('sdk', 'list', '--version', '3.2.2')).Output
+    Assert-True ($localOneHuman -match '(?m)^1 SDK installed \(.+ total\)\r?$') 'nik sdk list uses singular SDK noun when 1 SDK matches'
 
     $remoteHuman = (Invoke-Nik -NikHome $TestHome -Arguments @('sdk', 'list', '--remote', '--index-url', $IndexUrl)).Output
     Assert-True ($remoteHuman -match '(?m)^VERSION\s+TARGET\s+COMMIT\s+SIZE\s+INSTALLED\r?$' -and $remoteHuman -notmatch 'SDK ID') 'nik sdk list --remote displays clean VERSION TARGET COMMIT SIZE INSTALLED header'
@@ -511,7 +514,9 @@ try {
     Assert-True ($infoById.ExitCode -ne 0 -and $infoById.Output -match 'Invalid Free Pascal SDK version') 'nik sdk info rejects SDK IDs and only accepts exact versions'
 
     $info322 = (Invoke-Nik -NikHome $TestHome -Arguments @('sdk', 'info', '3.2.2', '--json')).Output | ConvertFrom-Json
-    Assert-True ($info322.sdkId -eq $Mock322.SdkId -and $info322.gitCommit -eq $Mock322.GitCommit -and $null -eq $info322.PSObject.Properties['default'] -and $info322.healthy -eq $true) 'nik sdk info 3.2.2 inspects SDK, gitCommit, and verifies health'
+    Assert-True ($info322.sdkId -eq $Mock322.SdkId -and $info322.gitCommit -eq $Mock322.GitCommit -and $info322.sizeBytes -gt 0 -and $null -eq $info322.PSObject.Properties['default'] -and $info322.healthy -eq $true) 'nik sdk info 3.2.2 inspects SDK, gitCommit, sizeBytes, and verifies health'
+    $info322Human = (Invoke-Nik -NikHome $TestHome -Arguments @('sdk', 'info', '3.2.2')).Output
+    Assert-True ($info322Human -match 'Install Size\s+:\s+\d+') 'nik sdk info human output displays Install Size'
 
     $info331 = (Invoke-Nik -NikHome $TestHome -Arguments @('sdk', 'info', '3.3.1', '--json')).Output | ConvertFrom-Json
     Assert-True ($info331.sdkId -eq $Mock331.SdkId -and $info331.gitRef -eq 'main' -and $info331.gitCommit -eq $Mock331.GitCommit -and $info331.healthy -eq $true) 'nik sdk info 3.3.1 inspects installed 3.3.1 SDK'

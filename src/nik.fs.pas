@@ -16,11 +16,15 @@ function StripUtf8Bom(const AText: string): string;
 function ReadFileTextUtf8(const AFilePath: string): string;
 procedure WriteFileTextUtf8(const AFilePath, AContent: string);
 function GetFileSizeSafe(const AFilePath: string): Int64;
+function GetDirectorySizeSafe(const ADir: string): Int64;
 
 implementation
 
 uses
   nik.types
+  {$IFDEF WINDOWS}
+  , Windows
+  {$ENDIF}
   {$IFDEF UNIX}
   , BaseUnix
   {$ENDIF};
@@ -221,5 +225,109 @@ begin
     Result := 0;
   end;
 end;
+
+{$IFDEF WINDOWS}
+const
+  NIK_FIND_EX_INFO_BASIC        = 1;
+  NIK_FIND_EX_SEARCH_NAME_MATCH = 0;
+  NIK_FIND_FIRST_EX_LARGE_FETCH = 2;
+
+function WinFindFirstFileExW(lpFileName: PWideChar; fInfoLevelId: DWORD;
+  lpFindFileData: Pointer; fSearchOp: DWORD; lpSearchFilter: Pointer;
+  dwAdditionalFlags: DWORD): THandle; stdcall; external 'kernel32' name 'FindFirstFileExW';
+
+function ScanDirectorySizeWin(const ADirW: UnicodeString): Int64;
+var
+  BaseDir, Pattern: UnicodeString;
+  FindHandle: THandle;
+  FindData: TWin32FindDataW;
+  Attr: DWORD;
+  IsDotDir: Boolean;
+begin
+  Result := 0;
+  if ADirW = '' then
+    Exit;
+
+  if (ADirW[Length(ADirW)] = '\') or (ADirW[Length(ADirW)] = '/') then
+    BaseDir := ADirW
+  else
+    BaseDir := ADirW + '\';
+  Pattern := BaseDir + '*';
+
+  FindHandle := WinFindFirstFileExW(PWideChar(Pattern), NIK_FIND_EX_INFO_BASIC,
+    @FindData, NIK_FIND_EX_SEARCH_NAME_MATCH, nil, NIK_FIND_FIRST_EX_LARGE_FETCH);
+  if FindHandle = INVALID_HANDLE_VALUE then
+    Exit;
+
+  try
+    repeat
+      Attr := FindData.dwFileAttributes;
+      if (Attr and FILE_ATTRIBUTE_REPARSE_POINT) <> 0 then
+        Continue;
+
+      if (Attr and FILE_ATTRIBUTE_DIRECTORY) <> 0 then
+      begin
+        IsDotDir := (FindData.cFileName[0] = '.') and
+                    ((FindData.cFileName[1] = #0) or
+                     ((FindData.cFileName[1] = '.') and (FindData.cFileName[2] = #0)));
+        if not IsDotDir then
+          Inc(Result, ScanDirectorySizeWin(BaseDir + UnicodeString(PWideChar(@FindData.cFileName[0]))));
+      end
+      else
+        Inc(Result, (Int64(FindData.nFileSizeHigh) shl 32) or Int64(Cardinal(FindData.nFileSizeLow)));
+    until not Windows.FindNextFileW(FindHandle, FindData);
+  finally
+    Windows.FindClose(FindHandle);
+  end;
+end;
+
+function GetDirectorySizeSafe(const ADir: string): Int64;
+begin
+  if (ADir = '') or (not DirectoryExists(ADir)) then
+    Exit(0);
+  Result := ScanDirectorySizeWin(UTF8Decode(ADir));
+end;
+{$ELSE}
+{$PUSH}
+{$WARN SYMBOL_PLATFORM OFF}
+function ScanDirectorySizePosix(const ADir: string): Int64;
+var
+  Rec: TSearchRec;
+  BaseDir: string;
+  IsDir, IsSymLink: Boolean;
+begin
+  Result := 0;
+  BaseDir := IncludeTrailingPathDelimiter(ADir);
+  if FindFirst(BaseDir + AllFilesMask, faAnyFile or faSymLink, Rec) = 0 then
+  begin
+    try
+      repeat
+        if (Rec.Name = '.') or (Rec.Name = '..') then
+          Continue;
+
+        IsSymLink := (Rec.Attr and faSymLink) <> 0;
+        if IsSymLink then
+          Continue;
+
+        IsDir := (Rec.Attr and faDirectory) <> 0;
+        if IsDir then
+          Inc(Result, ScanDirectorySizePosix(BaseDir + Rec.Name))
+        else if Rec.Size > 0 then
+          Inc(Result, Rec.Size);
+      until SysUtils.FindNext(Rec) <> 0;
+    finally
+      SysUtils.FindClose(Rec);
+    end;
+  end;
+end;
+
+function GetDirectorySizeSafe(const ADir: string): Int64;
+begin
+  if (ADir = '') or (not DirectoryExists(ADir)) then
+    Exit(0);
+  Result := ScanDirectorySizePosix(ADir);
+end;
+{$POP}
+{$ENDIF}
 
 end.
