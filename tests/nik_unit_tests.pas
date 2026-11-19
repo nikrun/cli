@@ -19,6 +19,8 @@ uses
   nik.manifest.types,
   nik.manifest.io,
   nik.archive,
+  nik.compiler.types,
+  nik.project,
   nik.cmd.init;
 
 type
@@ -876,6 +878,36 @@ begin
   CheckEnikError('Unsupported package archive format', 'unknown archive extension', @DoExtractPackage);
 end;
 
+{ ---- nik.project: output file names ---- }
+
+procedure TestOutputPathExtensions;
+var
+  Dir: string;
+
+  function Out(const ARaw, AOs: string; AKind: TCompileArtifactKind): string;
+  begin
+    Result := ExtractFileName(ResolveOutputBinaryPath(Dir, ARaw, AOs, AKind));
+  end;
+
+begin
+  Dir := IncludeTrailingPathDelimiter(GetTempDir(False)) + 'nik-unit-project';
+
+  CheckEqStr(Out('bin/app', 'win64', cakExecutable), 'app.exe', 'plain executable name gets .exe on Windows');
+  CheckEqStr(Out('bin/app.exe', 'win64', cakExecutable), 'app.exe', 'an explicit .exe stays');
+  CheckEqStr(Out('bin/Acme.Tools', 'win64', cakExecutable), 'Acme.Tools.exe', 'a dot inside the name is not an extension (executable)');
+  CheckEqStr(Out('bin/Acme.Tools', 'linux', cakExecutable), 'Acme.Tools', 'executables on Linux keep their name');
+  CheckEqStr(Out('bin/tool.bin', 'linux', cakExecutable), 'tool.bin', 'a known artifact extension stays');
+
+  CheckEqStr(Out('bin/foo', 'win64', cakSharedLibrary), 'foo.dll', 'library on Windows');
+  CheckEqStr(Out('bin/foo.bar', 'win64', cakSharedLibrary), 'foo.bar.dll', 'a dot inside a library name is not an extension');
+  CheckEqStr(Out('bin/foo', 'linux', cakSharedLibrary), 'libfoo.so', 'library on Linux gets prefix and suffix');
+  CheckEqStr(Out('bin/foo.bar', 'linux', cakSharedLibrary), 'libfoo.bar.so', 'dotted library name on Linux');
+  CheckEqStr(Out('bin/libfoo.so', 'linux', cakSharedLibrary), 'libfoo.so', 'an explicit .so stays');
+  CheckEqStr(Out('bin/foo', 'darwin', cakSharedLibrary), 'libfoo.dylib', 'library on macOS');
+
+  CheckEqStr(ResolveOutputBinaryPath(Dir, '', 'win64', cakCheckOnly), '', 'check-only without output has no file');
+end;
+
 { ---- runner ---- }
 
 procedure RunTest(const AName: string; AProc: TTestProc);
@@ -908,6 +940,7 @@ begin
     RunTest('archive: zip extraction', @TestZipExtraction);
     RunTest('archive: zip traversal is rejected', @TestZipRejectsTraversal);
     RunTest('archive: unsupported formats are rejected', @TestUnsupportedArchiveFormat);
+    RunTest('project: output file names', @TestOutputPathExtensions);
     RunTest('paths: safe segments and relative paths', @TestSafePathHelpers);
     RunTest('sdk: index rejects unsafe names', @TestSdkIndexRejectsUnsafeNames);
     RunTest('sdk: remote entries need a checksum', @TestRemoteEntryNeedsChecksum);

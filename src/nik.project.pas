@@ -134,6 +134,19 @@ begin
     Result := 'lib' + ABaseName;
 end;
 
+function IsKnownArtifactExtension(const AExtLower: string): Boolean;
+const
+  KNOWN: array[0..11] of string = (
+    '.exe', '.dll', '.so', '.dylib', '.bin', '.out', '.elf', '.com', '.wasm', '.a', '.lib', '.o');
+var
+  I: Integer;
+begin
+  for I := Low(KNOWN) to High(KNOWN) do
+    if KNOWN[I] = AExtLower then
+      Exit(True);
+  Result := False;
+end;
+
 function ResolveOutputBinaryPath(const AProjectDir, ARawOutput, ATargetOs: string;
   AArtifactKind: TCompileArtifactKind): string;
 var
@@ -144,7 +157,9 @@ begin
 
   Result := ResolveRelativePath(AProjectDir, ARawOutput);
   Ext := LowerCase(ExtractFileExt(Result));
-  if Ext <> '' then
+  // A dot inside the name ("Acme.Tools") is not a file extension: only an extension of a known
+  // artifact kind counts as already given. A check-only run keeps any extension.
+  if (Ext <> '') and ((AArtifactKind = cakCheckOnly) or IsKnownArtifactExtension(Ext)) then
     Exit;
 
   case AArtifactKind of

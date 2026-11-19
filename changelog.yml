@@ -9,6 +9,7 @@ changelog:
         - 'Reject YAML anchors, aliases and tags in `nik.yaml` with a clear error (quote the value to use it literally) and accept only plain decimal integers for numeric fields'
       deprecated: []
       fixed:
+        - 'Append `.exe`, `.dll`, `.so` or `.dylib` to a default output name that contains a dot (`name: Acme.Tools`), which was mistaken for a file extension'
         - 'Stop zip extraction through `tar`/`unzip` from hanging on tools that print many warnings (their output is drained now), and prefer the system `tar.exe` over a `tar.exe` found earlier in `PATH` on Windows'
         - 'Report argument errors, unknown commands and unexpected exceptions as a JSON object on stdout (empty stderr) when `--json` is given, instead of plain text on stderr'
         - 'Write `nik.lock`, config and manifest files by renaming a finished temporary file over the target, so an interrupted run or a concurrent reader never sees a truncated file'
