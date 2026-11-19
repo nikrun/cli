@@ -806,6 +806,8 @@ var
   CacheDir, PartFile, DownloadedZip: string;
   ProgressCb: TDownloadProgressProc;
 begin
+  ValidateRemoteSdkEntryForInstall(AEntry, ASkipVerify);
+
   CacheDir := GetNikrunCacheDir;
   EnsureDirExists(CacheDir);
   DownloadedZip := JoinPath(CacheDir, AEntry.FileName);

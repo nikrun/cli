@@ -13,7 +13,9 @@ changelog:
         - 'Parse apostrophes and double quotes inside unquoted `nik.yaml` values (for example `description: Don''t panic`) and write `nik.lock` entries with quotes, indicators or `null` so the file always reads back'
         - 'Accept blank and comment-only lines that contain tabs in `nik.yaml`, and bound the nesting depth of flow collections instead of overflowing the stack'
       removed: []
-      security: []
+      security:
+        - 'Refuse to install a remote SDK whose index entry has no `sha256` unless `--skip-verify` is passed, instead of installing it unverified'
+        - 'Reject SDK ids, archive file names and manifest paths that could leave `~/.nikrun` (`..`, separators, drive letters) when reading `index.json` and `sdk-manifest.json`'
   - version: 0.1.0
     date: '2026-11-18'
     changes:

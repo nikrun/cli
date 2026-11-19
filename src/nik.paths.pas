@@ -24,6 +24,13 @@ function NormalizeForwardSlashes(const APath: string): string;
 function NormalizeNativeSeparators(const APath: string): string;
 function FindExecutableInPath(const AExeName: string): string;
 
+{ True for a single file or directory name that cannot leave its parent directory:
+  not empty, not made of dots only, no separators, drive colons, wildcards or control characters. }
+function IsSafePathSegment(const AName: string): Boolean;
+{ True for a relative path that stays below its base directory: not rooted, no drive,
+  no '..' segment. Both '/' and '\' count as separators. }
+function IsSafeRelativePath(const APath: string): Boolean;
+
 implementation
 
 uses
@@ -116,6 +123,52 @@ begin
     ExeToFind := ExeToFind + '.exe';
   {$ENDIF}
   Result := ExeSearch(ExeToFind, SysUtils.GetEnvironmentVariable('PATH'));
+end;
+
+function IsSafePathSegment(const AName: string): Boolean;
+var
+  I: Integer;
+  OnlyDots: Boolean;
+begin
+  Result := False;
+  if (AName = '') or (AName <> Trim(AName)) then
+    Exit;
+
+  OnlyDots := True;
+  for I := 1 to Length(AName) do
+  begin
+    if AName[I] <> '.' then
+      OnlyDots := False;
+    if (AName[I] < #32) or (AName[I] in ['/', '\', ':', '*', '?', '"', '<', '>', '|']) then
+      Exit;
+  end;
+  Result := not OnlyDots;
+end;
+
+function IsSafeRelativePath(const APath: string): Boolean;
+var
+  Norm, Seg: string;
+  I, StartIdx: Integer;
+begin
+  Result := False;
+  if (Trim(APath) = '') or IsAbsolutePath(APath) then
+    Exit;
+
+  Norm := NormalizeForwardSlashes(APath);
+  StartIdx := 1;
+  for I := 1 to Length(Norm) + 1 do
+  begin
+    if (I > Length(Norm)) or (Norm[I] = '/') then
+    begin
+      Seg := Copy(Norm, StartIdx, I - StartIdx);
+      if (Seg = '..') or (Pos(':', Seg) > 0) then
+        Exit;
+      StartIdx := I + 1;
+    end
+    else if Norm[I] < #32 then
+      Exit;
+  end;
+  Result := True;
 end;
 
 function GetUserHomeDir: string;

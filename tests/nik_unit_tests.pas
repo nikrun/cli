@@ -12,7 +12,11 @@ uses
   nik.paths,
   nik.yaml,
   nik.pkg.types,
-  nik.pkg.lock;
+  nik.pkg.lock,
+  nik.sdk.config;
+
+type
+  TTestProc = procedure;
 
 var
   TestsPassed: Integer = 0;
@@ -293,10 +297,175 @@ begin
   end;
 end;
 
-{ ---- runner ---- }
+{ ---- nik.paths: safe names and relative paths ---- }
 
-type
-  TTestProc = procedure;
+procedure TestSafePathHelpers;
+begin
+  Check(IsSafePathSegment('nikrun-fpc-sdk-3.2.2-0d122c49-x86_64-win64'), 'regular sdk id is a safe segment');
+  Check(IsSafePathSegment('sdk.zip'), 'file name is a safe segment');
+  Check(IsSafePathSegment('my sdk'), 'inner space is allowed');
+  Check(not IsSafePathSegment(''), 'empty segment');
+  Check(not IsSafePathSegment('.'), 'dot segment');
+  Check(not IsSafePathSegment('..'), 'dot-dot segment');
+  Check(not IsSafePathSegment('...'), 'dots-only segment');
+  Check(not IsSafePathSegment('a/b'), 'slash in segment');
+  Check(not IsSafePathSegment('a\b'), 'backslash in segment');
+  Check(not IsSafePathSegment('../x'), 'parent traversal in segment');
+  Check(not IsSafePathSegment('C:'), 'drive colon in segment');
+  Check(not IsSafePathSegment('a:stream'), 'alternate data stream in segment');
+  Check(not IsSafePathSegment(' lead'), 'leading blank');
+  Check(not IsSafePathSegment('a*b'), 'wildcard');
+  Check(not IsSafePathSegment('a'#10'b'), 'control character');
+
+  Check(IsSafeRelativePath('bin/x86_64-win64'), 'plain relative path');
+  Check(IsSafeRelativePath('bin\x86_64-win64\fpc.exe'), 'backslash relative path');
+  Check(IsSafeRelativePath('./source/rtl'), 'dot-prefixed relative path');
+  Check(not IsSafeRelativePath(''), 'empty path');
+  Check(not IsSafeRelativePath('../x'), 'leading parent segment');
+  Check(not IsSafeRelativePath('a/../../x'), 'parent segment in the middle');
+  Check(not IsSafeRelativePath('a\..\x'), 'backslash parent segment');
+  Check(not IsSafeRelativePath('/etc/passwd'), 'rooted path');
+  Check(not IsSafeRelativePath('\Windows'), 'rooted backslash path');
+  Check(not IsSafeRelativePath('C:\Windows'), 'drive path');
+end;
+
+{ ---- nik.sdk.config: index and manifest hardening ---- }
+
+procedure CheckEnikError(const AMessagePart, AContext: string; AProc: TTestProc);
+var
+  Msg: string;
+begin
+  Msg := '';
+  try
+    AProc;
+  except
+    on E: ENikError do
+      Msg := E.Message;
+  end;
+  Check(Msg <> '', AContext + ': ENikError expected');
+  Check(Pos(AMessagePart, Msg) > 0, AContext + ': message "' + Msg + '" should contain "' + AMessagePart + '"');
+end;
+
+var
+  GIndexJson: string;
+  GEntry: TRemoteSdkEntry;
+  GSkipVerify: Boolean;
+  GManifestDir: string;
+
+procedure DoParseIndex;
+begin
+  ParseSdkIndexJson(GIndexJson);
+end;
+
+procedure DoValidateEntry;
+begin
+  ValidateRemoteSdkEntryForInstall(GEntry, GSkipVerify);
+end;
+
+procedure DoLoadManifest;
+begin
+  LoadSdkManifest(GManifestDir);
+end;
+
+function SdkIndexJson(const ASdkId, AFileName: string): string;
+begin
+  Result := '{"schemaVersion":1,"sdks":[{"sdkId":"' + ASdkId + '","fpcVersion":"3.2.2",' +
+    '"targetOs":"win64","targetCpu":"x86_64","targetTriplet":"x86_64-win64",' +
+    '"fileName":"' + AFileName + '","sha256":"' + StringOfChar('A', 64) + '",' +
+    '"downloadUrl":"https://example.com/sdk.zip"}]}';
+end;
+
+procedure TestSdkIndexRejectsUnsafeNames;
+var
+  Index: TSdkIndex;
+begin
+  Index := ParseSdkIndexJson(SdkIndexJson('nikrun-fpc-sdk-3.2.2-x86_64-win64', 'sdk.zip'));
+  Check(Length(Index.Sdks) = 1, 'valid index entry parses');
+  CheckEqStr(Index.Sdks[0].Sha256, StringOfChar('a', 64), 'sha256 is normalized to lower case');
+
+  GIndexJson := SdkIndexJson('..', 'sdk.zip');
+  CheckEnikError('sdkId', 'sdkId ..', @DoParseIndex);
+  GIndexJson := SdkIndexJson('a/b', 'sdk.zip');
+  CheckEnikError('sdkId', 'sdkId with slash', @DoParseIndex);
+  GIndexJson := SdkIndexJson('good-id', '../../x');
+  CheckEnikError('fileName', 'fileName traversal', @DoParseIndex);
+  GIndexJson := SdkIndexJson('good-id', 'C:/x.zip');
+  CheckEnikError('fileName', 'fileName with drive', @DoParseIndex);
+end;
+
+procedure TestRemoteEntryNeedsChecksum;
+begin
+  GEntry := Default(TRemoteSdkEntry);
+  GEntry.SdkId := 'sdk-1';
+  GEntry.FileName := 'sdk-1.zip';
+  GEntry.DownloadUrl := 'https://example.com/sdk-1.zip';
+  GEntry.Sha256 := StringOfChar('a', 64);
+  GSkipVerify := False;
+  ValidateRemoteSdkEntryForInstall(GEntry, GSkipVerify);
+  Check(True, 'complete entry is accepted');
+
+  GEntry.Sha256 := '';
+  CheckEnikError('no sha256', 'missing checksum', @DoValidateEntry);
+  GEntry.Sha256 := '   ';
+  CheckEnikError('no sha256', 'blank checksum', @DoValidateEntry);
+
+  GSkipVerify := True;
+  ValidateRemoteSdkEntryForInstall(GEntry, GSkipVerify);
+  Check(True, '--skip-verify accepts an entry without checksum');
+
+  GSkipVerify := False;
+  GEntry.Sha256 := StringOfChar('a', 64);
+  GEntry.DownloadUrl := '';
+  CheckEnikError('no downloadUrl', 'missing url', @DoValidateEntry);
+  GEntry.DownloadUrl := 'https://example.com/sdk-1.zip';
+  GEntry.FileName := '';
+  CheckEnikError('no valid fileName', 'missing file name', @DoValidateEntry);
+  GEntry.FileName := '../sdk-1.zip';
+  CheckEnikError('no valid fileName', 'traversing file name', @DoValidateEntry);
+end;
+
+function SdkManifestJson(const ASdkId, ABinDir, AFpcBinary: string): string;
+begin
+  Result := '{"schemaVersion":1,"sdkId":"' + ASdkId + '","fpcVersion":"3.2.2",' +
+    '"targetOs":"win64","targetCpu":"x86_64","targetTriplet":"x86_64-win64",' +
+    '"paths":{"binDir":"' + ABinDir + '","fpcBinary":"' + AFpcBinary + '",' +
+    '"unitsDir":"units/x86_64-win64","rtlSourceDir":"source/rtl"}}';
+end;
+
+procedure TestSdkManifestRejectsEscapingPaths;
+var
+  Manifest: TSdkManifest;
+begin
+  GManifestDir := IncludeTrailingPathDelimiter(GetTempDir(False)) + Format('nik-unit-sdk-%d', [GetProcessID]);
+  DeleteDirectoryRecursive(GManifestDir);
+  EnsureDirExists(GManifestDir);
+  try
+    WriteFileTextUtf8(JoinPath(GManifestDir, 'sdk-manifest.json'),
+      SdkManifestJson('nikrun-fpc-sdk-3.2.2-x86_64-win64', 'bin/x86_64-win64', 'bin/x86_64-win64/fpc.exe'));
+    Manifest := LoadSdkManifest(GManifestDir);
+    CheckEqStr(Manifest.SdkId, 'nikrun-fpc-sdk-3.2.2-x86_64-win64', 'valid manifest loads');
+
+    WriteFileTextUtf8(JoinPath(GManifestDir, 'sdk-manifest.json'),
+      SdkManifestJson('..', 'bin/x86_64-win64', 'bin/x86_64-win64/fpc.exe'));
+    CheckEnikError('Invalid sdkId', 'sdkId ..', @DoLoadManifest);
+
+    WriteFileTextUtf8(JoinPath(GManifestDir, 'sdk-manifest.json'),
+      SdkManifestJson('.', 'bin/x86_64-win64', 'bin/x86_64-win64/fpc.exe'));
+    CheckEnikError('Invalid sdkId', 'sdkId .', @DoLoadManifest);
+
+    WriteFileTextUtf8(JoinPath(GManifestDir, 'sdk-manifest.json'),
+      SdkManifestJson('good-id', '../outside', 'bin/x86_64-win64/fpc.exe'));
+    CheckEnikError('paths.binDir', 'binDir traversal', @DoLoadManifest);
+
+    WriteFileTextUtf8(JoinPath(GManifestDir, 'sdk-manifest.json'),
+      SdkManifestJson('good-id', 'bin/x86_64-win64', '/usr/bin/fpc'));
+    CheckEnikError('paths.fpcBinary', 'rooted fpcBinary', @DoLoadManifest);
+  finally
+    DeleteDirectoryRecursive(GManifestDir);
+  end;
+end;
+
+{ ---- runner ---- }
 
 procedure RunTest(const AName: string; AProc: TTestProc);
 begin
@@ -315,6 +484,10 @@ begin
     RunTest('yaml: flow nesting is bounded', @TestFlowNestingIsBounded);
     RunTest('yaml: scalar writer round trip', @TestScalarWriterRoundTrip);
     RunTest('lock: apostrophes round trip', @TestLockFileWithApostrophesRoundTrips);
+    RunTest('paths: safe segments and relative paths', @TestSafePathHelpers);
+    RunTest('sdk: index rejects unsafe names', @TestSdkIndexRejectsUnsafeNames);
+    RunTest('sdk: remote entries need a checksum', @TestRemoteEntryNeedsChecksum);
+    RunTest('sdk: manifest rejects escaping paths', @TestSdkManifestRejectsEscapingPaths);
     WriteLn(Format('nik unit tests: %d checks passed.', [TestsPassed]));
   except
     on E: Exception do

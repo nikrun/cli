@@ -14,6 +14,10 @@ function TryLoadSdkManifest(const ASdkDir: string; out AManifest: TSdkManifest):
 
 function ParseSdkIndexJson(const AJsonText: string): TSdkIndex;
 
+{ Refuses an index entry that cannot be installed safely: it needs a download URL, a plain
+  archive file name and, unless ASkipVerify is set, a SHA-256 checksum to verify against. }
+procedure ValidateRemoteSdkEntryForInstall(const AEntry: TRemoteSdkEntry; ASkipVerify: Boolean);
+
 function GenerateFpcCfgForSdk(const ASdkPath: string; const AManifest: TSdkManifest): string;
 
 implementation
@@ -63,6 +67,13 @@ begin
   Item := AObj.Find(AKey);
   if (Item <> nil) and (Item.JSONType = jtNumber) then
     Result := Item.AsInt64;
+end;
+
+procedure CheckManifestPath(const AManifestFile, AField, AValue: string);
+begin
+  if (AValue <> '') and (not IsSafeRelativePath(AValue)) then
+    raise ENikError.CreateFmt('Invalid ''paths.%s'' in %s (''%s'' must be a relative path inside the SDK).',
+      [AField, AManifestFile, AValue]);
 end;
 
 function LoadSdkManifest(const ASdkDir: string): TSdkManifest;
@@ -115,6 +126,19 @@ begin
 
     if (Result.SdkId = '') or (Result.Paths.FpcBinary = '') then
       raise ENikError.CreateFmt('Incomplete SDK manifest in %s.', [ManifestFile]);
+
+    // The id names the install directory below ~/.nikrun/sdks and every path is joined onto
+    // the SDK directory, so none of them may point elsewhere.
+    if not IsSafePathSegment(Result.SdkId) then
+      raise ENikError.CreateFmt('Invalid sdkId ''%s'' in %s (must be a plain directory name).',
+        [Result.SdkId, ManifestFile]);
+    CheckManifestPath(ManifestFile, 'binDir', Result.Paths.BinDir);
+    CheckManifestPath(ManifestFile, 'fpcBinary', Result.Paths.FpcBinary);
+    CheckManifestPath(ManifestFile, 'ppcBinary', Result.Paths.PpcBinary);
+    CheckManifestPath(ManifestFile, 'fpcmkcfgBinary', Result.Paths.FpcmkcfgBinary);
+    CheckManifestPath(ManifestFile, 'unitsDir', Result.Paths.UnitsDir);
+    CheckManifestPath(ManifestFile, 'rtlSourceDir', Result.Paths.RtlSourceDir);
+    CheckManifestPath(ManifestFile, 'packagesSourceDir', Result.Paths.PackagesSourceDir);
   finally
     Data.Free;
   end;
@@ -214,13 +238,34 @@ begin
       Result.Sdks[Count].Sha256        := LowerCase(Trim(GetJsonStr(ItemObj, 'sha256')));
       Result.Sdks[Count].DownloadUrl   := GetJsonStr(ItemObj, 'downloadUrl');
       if Result.Sdks[Count].SdkId <> '' then
+      begin
+        // sdkId and fileName become directory and file names below ~/.nikrun.
+        if not IsSafePathSegment(Result.Sdks[Count].SdkId) then
+          raise ENikError.CreateFmt('Invalid index.json: sdkId ''%s'' is not a plain directory name.',
+            [Result.Sdks[Count].SdkId]);
+        if (Result.Sdks[Count].FileName <> '') and (not IsSafePathSegment(Result.Sdks[Count].FileName)) then
+          raise ENikError.CreateFmt('Invalid index.json: fileName ''%s'' of SDK ''%s'' is not a plain file name.',
+            [Result.Sdks[Count].FileName, Result.Sdks[Count].SdkId]);
         Inc(Count);
+      end;
     end;
     SetLength(Result.Sdks, Count);
     SortRemoteEntries(Result.Sdks);
   finally
     Data.Free;
   end;
+end;
+
+procedure ValidateRemoteSdkEntryForInstall(const AEntry: TRemoteSdkEntry; ASkipVerify: Boolean);
+begin
+  if Trim(AEntry.DownloadUrl) = '' then
+    raise ENikError.CreateFmt('SDK ''%s'' has no downloadUrl in the SDK index.', [AEntry.SdkId]);
+  if not IsSafePathSegment(AEntry.FileName) then
+    raise ENikError.CreateFmt('SDK ''%s'' has no valid fileName in the SDK index.', [AEntry.SdkId]);
+  if (not ASkipVerify) and (Trim(AEntry.Sha256) = '') then
+    raise ENikError.CreateFmt(
+      'SDK ''%s'' has no sha256 in the SDK index; refusing to install an unverified archive ' +
+      '(pass --skip-verify to install it anyway).', [AEntry.SdkId]);
 end;
 
 function CaptureCommandFirstLine(const AExe: string; const AArgs: array of string): string;
