@@ -27,7 +27,7 @@ end;
 
 procedure PrintGlobalHelp;
 begin
-  WriteLn(StyleBold('nik') + ' ' + NIK_VERSION + ' - Modern Zero-Config Toolchain for Free Pascal');
+  WriteLn(StyleBold('Nikrun CLI') + ' (' + StyleBold('nik') + ') ' + NIK_VERSION + ' - Modern Zero-Config Toolchain for Free Pascal');
   WriteLn;
   WriteLn(StyleBold('USAGE:'));
   WriteLn('  nik [GLOBAL OPTIONS] <COMMAND> [ARGS]');

@@ -376,7 +376,7 @@ begin
   SL := TStringList.Create;
   try
     SL.Add('# ==============================================================================');
-    SL.Add('# Nikrun Portable FreePascal SDK Configuration (Auto-generated)');
+    SL.Add('# Nikrun Portable Free Pascal SDK Configuration (Auto-generated)');
     SL.Add(Format('# SDK: %s (FPC %s, %s)', [AManifest.SdkId, AManifest.FpcVersion, AManifest.TargetTriplet]));
     SL.Add('# ==============================================================================');
     SL.Add('');
