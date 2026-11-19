@@ -527,7 +527,7 @@ begin
   AIntegrity := '';
 
   PrefixLower := LowerCase(Trim(ACommitOrPrefix));
-  if PrefixLower = '' then
+  if not IsHexCommitSpecifier(PrefixLower) then
     Exit;
 
   RepoCacheBase := GetGitRepoCacheBaseDir(ANormRepoUrl);
@@ -741,6 +741,11 @@ procedure EnsureGitPackageCached(const ANormRepoUrl, ACommitOrPrefix, AExpectedI
 var
   StagingDir, FinalDir, ExistingIntegrity: string;
 begin
+  // Last line of defence before the value is handed to git or used as a cache directory name.
+  if not IsHexCommitSpecifier(ACommitOrPrefix) then
+    raise ENikError.CreateFmt('Invalid commit ''%s'' for Git dependency ''%s'' (expected 7 to 40 hexadecimal digits).',
+      [ACommitOrPrefix, ANormRepoUrl]);
+
   if FindCachedGitPackageDir(ANormRepoUrl, ACommitOrPrefix, AResolvedCommit40, ACacheDir, AActualIntegrity) then
   begin
     if (AExpectedIntegrity <> '') and (not SameText(AActualIntegrity, AExpectedIntegrity)) then

@@ -22,7 +22,7 @@ function SyncLockFileOnDisk(const AProjectDir: string; const ADesired: TLockedPa
 implementation
 
 uses
-  nik.paths, nik.fs, nik.sha256, nik.yaml;
+  nik.paths, nik.fs, nik.sha256, nik.yaml, nik.pkg.semver;
 
 type
   TTreeFileEntry = record
@@ -245,8 +245,10 @@ begin
       case Pkg.Kind of
         lpkGit:
           begin
-            if (Pkg.Url = '') or (Length(Pkg.Rev) <> 40) then
-              raise ENikError.CreateFmt('%s:%d: Git entry ''%s'' in nik.lock requires ''url'' and 40-char ''rev''.',
+            // The rev reaches `git fetch`/`git checkout` and names a cache directory, so it must be a
+            // plain 40-digit commit hash; anything else could be read as a git option or a path.
+            if (Pkg.Url = '') or (Length(Pkg.Rev) <> 40) or (not IsHexCommitSpecifier(Pkg.Rev)) then
+              raise ENikError.CreateFmt('%s:%d: Git entry ''%s'' in nik.lock requires ''url'' and a 40-digit hexadecimal ''rev''.',
                 [LockPath, ItemNode.Line, Pkg.Id]);
             if (Pkg.Integrity = '') or (not ValidateHexSha256(Pkg.Integrity, NormHex)) then
               raise ENikError.CreateFmt('%s:%d: Git entry ''%s'' in nik.lock has invalid ''integrity''.',

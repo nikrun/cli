@@ -15,6 +15,7 @@ changelog:
       removed: []
       security:
         - 'Refuse to install a remote SDK whose index entry has no `sha256` unless `--skip-verify` is passed, instead of installing it unverified'
+        - 'Require a 40-digit hexadecimal `rev` for Git entries in `nik.lock` and validate every commit before it reaches `git` or a cache path, closing option injection (`--upload-pack=…`) and path traversal through a crafted lock file'
         - 'Reject SDK ids, archive file names and manifest paths that could leave `~/.nikrun` (`..`, separators, drive letters) when reading `index.json` and `sdk-manifest.json`'
   - version: 0.1.0
     date: '2026-11-18'

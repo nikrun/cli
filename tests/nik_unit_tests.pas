@@ -13,6 +13,7 @@ uses
   nik.yaml,
   nik.pkg.types,
   nik.pkg.lock,
+  nik.pkg.fetch,
   nik.sdk.config;
 
 type
@@ -465,6 +466,76 @@ begin
   end;
 end;
 
+{ ---- nik.pkg.lock / nik.pkg.fetch: commit hashes never reach git or the cache unchecked ---- }
+
+var
+  GLockDir: string;
+  GEvilRev: string;
+
+procedure DoLoadLock;
+begin
+  LoadLockFile(GLockDir);
+end;
+
+procedure DoEnsureGitPackage;
+var
+  Commit, CacheDir, Integrity: string;
+begin
+  EnsureGitPackageCached('https://example.com/lib.git', GEvilRev, '', Commit, CacheDir, Integrity);
+end;
+
+function GitLockText(const ARev: string): string;
+begin
+  Result := 'lockVersion: 1'#10 +
+    'packages:'#10 +
+    '  - id: example.com/lib'#10 +
+    '    kind: git'#10 +
+    '    url: https://example.com/lib.git'#10 +
+    '    rev: "' + ARev + '"'#10 +
+    '    integrity: sha256-' + StringOfChar('b', 64) + #10;
+end;
+
+procedure TestLockRejectsNonHexRev;
+var
+  Loaded: TLockFile;
+begin
+  GLockDir := IncludeTrailingPathDelimiter(GetTempDir(False)) + Format('nik-unit-rev-%d', [GetProcessID]);
+  DeleteDirectoryRecursive(GLockDir);
+  EnsureDirExists(GLockDir);
+  try
+    WriteFileTextUtf8(JoinPath(GLockDir, NIK_LOCK_FILENAME), GitLockText(StringOfChar('a', 40)));
+    Loaded := LoadLockFile(GLockDir);
+    Check((Length(Loaded.Packages) = 1) and (Loaded.Packages[0].Rev = StringOfChar('a', 40)), 'hex rev loads');
+
+    // 40 characters, so the old length check let it through
+    WriteFileTextUtf8(JoinPath(GLockDir, NIK_LOCK_FILENAME), GitLockText('--upload-pack=' + StringOfChar('x', 26)));
+    CheckEnikError('hexadecimal', 'git option as rev', @DoLoadLock);
+
+    WriteFileTextUtf8(JoinPath(GLockDir, NIK_LOCK_FILENAME), GitLockText('..\..\..\..\..\..\..\..\..\..\..\..\x'));
+    CheckEnikError('hexadecimal', 'path traversal as rev', @DoLoadLock);
+
+    WriteFileTextUtf8(JoinPath(GLockDir, NIK_LOCK_FILENAME), GitLockText(StringOfChar('g', 40)));
+    CheckEnikError('hexadecimal', 'non-hex letters as rev', @DoLoadLock);
+  finally
+    DeleteDirectoryRecursive(GLockDir);
+  end;
+end;
+
+procedure TestGitFetchRejectsNonHexCommit;
+var
+  Commit, CacheDir, Integrity: string;
+begin
+  Check(not FindCachedGitPackageDir('https://example.com/lib.git', '..\..\..\x1234567890',
+    Commit, CacheDir, Integrity), 'cache lookup ignores a traversing commit');
+  Check(not FindCachedGitPackageDir('https://example.com/lib.git', '--upload-pack=x',
+    Commit, CacheDir, Integrity), 'cache lookup ignores a git option as commit');
+
+  GEvilRev := '--upload-pack=touch-pwned';
+  CheckEnikError('Invalid commit', 'fetch with a git option as commit', @DoEnsureGitPackage);
+  GEvilRev := '';
+  CheckEnikError('Invalid commit', 'fetch with an empty commit', @DoEnsureGitPackage);
+end;
+
 { ---- runner ---- }
 
 procedure RunTest(const AName: string; AProc: TTestProc);
@@ -484,6 +555,8 @@ begin
     RunTest('yaml: flow nesting is bounded', @TestFlowNestingIsBounded);
     RunTest('yaml: scalar writer round trip', @TestScalarWriterRoundTrip);
     RunTest('lock: apostrophes round trip', @TestLockFileWithApostrophesRoundTrips);
+    RunTest('lock: non-hex rev is rejected', @TestLockRejectsNonHexRev);
+    RunTest('fetch: non-hex commit never reaches git', @TestGitFetchRejectsNonHexCommit);
     RunTest('paths: safe segments and relative paths', @TestSafePathHelpers);
     RunTest('sdk: index rejects unsafe names', @TestSdkIndexRejectsUnsafeNames);
     RunTest('sdk: remote entries need a checksum', @TestRemoteEntryNeedsChecksum);
