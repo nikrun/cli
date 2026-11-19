@@ -9,6 +9,7 @@ changelog:
         - 'Reject YAML anchors, aliases and tags in `nik.yaml` with a clear error (quote the value to use it literally) and accept only plain decimal integers for numeric fields'
       deprecated: []
       fixed:
+        - 'Report argument errors, unknown commands and unexpected exceptions as a JSON object on stdout (empty stderr) when `--json` is given, instead of plain text on stderr'
         - 'Write `nik.lock`, config and manifest files by renaming a finished temporary file over the target, so an interrupted run or a concurrent reader never sees a truncated file'
         - 'Report a permanent directory-move failure at once with the operating-system reason instead of retrying 25 times, and remove Windows junctions and directory symlinks inside a deleted tree as links instead of failing on them'
         - 'Keep the `nik.lock` entries of other targets, including their transitive packages, when `nik build` rewrites the lock for the active target, so `--locked` builds on another OS no longer fail after a local build'

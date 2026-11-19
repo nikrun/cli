@@ -409,6 +409,19 @@ try {
     $initNoSdkRes = Invoke-Nik -NikHome $TestHome -Arguments @('init', $EmptyInitDir) -AllowFailure
     Assert-True ($initNoSdkRes.ExitCode -ne 0 -and $initNoSdkRes.Output -match 'Cannot determine Free Pascal version') 'nik init fails cleanly when no SDK is installed and no --fpc or template.yaml is given'
 
+    # 2d. With --json even errors raised outside the command-specific JSON paths stay machine readable:
+    #     one JSON object on stdout, empty stderr, non-zero exit code.
+    foreach ($jsonErrCase in @(
+        @{ Name = 'unknown option'; Args = @('build', '--json', '--bogus'); Pattern = "Unknown option '--bogus'" },
+        @{ Name = 'option not supported by the subcommand'; Args = @('sdk', 'install', '3.2.2', '--json'); Pattern = 'Unknown option' },
+        @{ Name = 'unknown command'; Args = @('frobnicate', '--json'); Pattern = "Unknown command 'frobnicate'" }
+    )) {
+        $jsonErrRaw = Invoke-NikSplitStreams -NikHome $TestHome -Arguments $jsonErrCase.Args -AllowFailure
+        $jsonErrObj = $null
+        try { $jsonErrObj = $jsonErrRaw.StdOut.Trim() | ConvertFrom-Json } catch { }
+        Assert-True ($jsonErrRaw.ExitCode -ne 0 -and [string]::IsNullOrWhiteSpace($jsonErrRaw.StdErr) -and $null -ne $jsonErrObj -and $jsonErrObj.success -eq $false -and $jsonErrObj.exitCode -eq $jsonErrRaw.ExitCode -and $jsonErrObj.error -match $jsonErrCase.Pattern) "nik --json reports an $($jsonErrCase.Name) as a JSON object on stdout with empty stderr"
+    }
+
     # 2c. nik init rejects an unsafe project name before it touches the SDK lookup or the file system
     $UnsafeInitDir = Join-Path $WorkDir 'init-unsafe-name'
     $initBadName = Invoke-Nik -NikHome $TestHome -Arguments @('init', $UnsafeInitDir, '--name', '../../escape') -AllowFailure

@@ -8,7 +8,7 @@ program nik;
 {$ENDIF}
 
 uses
-  SysUtils,
+  SysUtils, fpjson,
   nik.types,
   nik.platform,
   nik.term,
@@ -48,6 +48,40 @@ begin
   WriteLn('  -h, --help               Print help information');
   WriteLn;
   WriteLn('Run ' + StyleBold('nik <COMMAND> --help') + ' for detailed information on a command.');
+end;
+
+function JsonRequested: Boolean;
+var
+  I: Integer;
+begin
+  Result := False;
+  for I := 1 to ParamCount do
+    if ParamStr(I) = '--json' then
+      Exit(True);
+end;
+
+// Last-resort error report. Commands that know their own JSON shape (build, pkg, init) report
+// their errors themselves; everything that still reaches this point (argument errors, unknown
+// commands, unexpected exceptions) must not break `--json` consumers, so it becomes a JSON
+// object on stdout with an empty stderr, like the command-level error objects.
+procedure ReportFatalError(const AMessage: string; AExitCode: Integer);
+var
+  Root: TJSONObject;
+begin
+  if JsonRequested then
+  begin
+    Root := TJSONObject.Create;
+    try
+      Root.Add('success', False);
+      Root.Add('exitCode', AExitCode);
+      Root.Add('error', AMessage);
+      WriteJson(Root);
+    finally
+      Root.Free;
+    end;
+  end
+  else
+    WriteError(AMessage);
 end;
 
 function RunCli: Integer;
@@ -160,12 +194,12 @@ begin
   except
     on E: ENikError do
     begin
-      WriteError(E.Message);
+      ReportFatalError(E.Message, E.ExitCode);
       ExitCode := E.ExitCode;
     end;
     on E: Exception do
     begin
-      WriteError(E.Message);
+      ReportFatalError(E.Message, 1);
       ExitCode := 1;
     end;
   end;
