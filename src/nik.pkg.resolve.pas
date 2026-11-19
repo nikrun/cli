@@ -462,6 +462,10 @@ begin
   ExpectedIntegrity := '';
   if PinnedPrefix <> '' then
   begin
+    // A pin names an immutable commit: when nik.lock already records that commit, the tree must still
+    // hash to the recorded integrity, otherwise `nik pkg update` would silently overwrite it.
+    if HasLock and SameText(Copy(LockedEntry.Rev, 1, Length(PinnedPrefix)), PinnedPrefix) then
+      ExpectedIntegrity := LockedEntry.Integrity;
     EnsureGitPackageCached(AReq.NormUrl, PinnedPrefix, ExpectedIntegrity,
       AReq.ChosenRev40, AReq.ChosenCacheDir, AReq.ChosenIntegrity);
     AReq.ChosenVersion := '';
@@ -567,16 +571,6 @@ begin
     CollectDeclaredManifestPkgIds(AParsed.Targets[I].Overlay, AParsed.ProjectDir, Result);
   for I := 0 to High(AParsed.Profiles) do
     CollectDeclaredManifestPkgIds(AParsed.Profiles[I].Overlay, AParsed.ProjectDir, Result);
-end;
-
-function StringInList(const AList: TStringArray; const AValue: string): Boolean;
-var
-  I: Integer;
-begin
-  for I := 0 to High(AList) do
-    if AList[I] = AValue then
-      Exit(True);
-  Result := False;
 end;
 
 function ExecuteGraphResolution(const AParsedRoot: TParsedManifest;
@@ -1117,24 +1111,24 @@ begin
 
   Result.Packages := ResolvedList;
 
-  // Preserve lock entries belonging to other manifest overlays (e.g. test.dependencies or other OS targets)
+  // A build resolves only the active target, but nik.lock covers every manifest overlay (other OS
+  // targets, profiles, test.dependencies). The lock is a flat list without edges, so an entry cannot be
+  // attributed to a section; keep every entry this closure did not produce, including the transitive
+  // packages of other targets (dropping them made `--locked` builds on another OS fail). Entries that
+  // nothing needs any more are pruned by `nik pkg fetch`, which resolves all sections.
   if APreserveOtherRootSectionsInLock and ExistingLock.ExistsOnDisk then
   begin
-    DeclaredRootIds := CollectAllDeclaredRemoteIdsInParsed(AParsedRoot);
     for I := 0 to High(ExistingLock.Packages) do
     begin
-      if StringInList(DeclaredRootIds, ExistingLock.Packages[I].Id) then
-      begin
-        NeedsRestart := False;
-        for PassNo := 0 to High(DesiredLocks) do
-          if DesiredLocks[PassNo].Id = ExistingLock.Packages[I].Id then
-          begin
-            NeedsRestart := True;
-            Break;
-          end;
-        if not NeedsRestart then
-          RecordDesiredLock(ExistingLock.Packages[I]);
-      end;
+      NeedsRestart := False;
+      for PassNo := 0 to High(DesiredLocks) do
+        if DesiredLocks[PassNo].Id = ExistingLock.Packages[I].Id then
+        begin
+          NeedsRestart := True;
+          Break;
+        end;
+      if not NeedsRestart then
+        RecordDesiredLock(ExistingLock.Packages[I]);
     end;
   end;
 

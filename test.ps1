@@ -2381,6 +2381,69 @@ package:
         $lockAfterPrune = [System.IO.File]::ReadAllText((Join-Path $PurePkgDir 'nik.lock'))
         Assert-True ($pruneRes.lockUpdated -eq $true -and $lockAfterPrune -notmatch 'mono-suite') 'Deleting a dependency from nik.yaml prunes its entry from nik.lock'
 
+        # 3h2. A target-specific build must keep the lock entries (also the transitive ones) of the other targets,
+        #      otherwise CI on another OS fails with --locked after a developer built locally.
+        $OtherOsTarget = if ($HostOs -eq 'win64') { 'unix' } else { 'windows' }
+        $KeepLockDir = Join-Path $WorkDir 'pkg-e2e\keep-other-target-lock'
+        New-Item -ItemType Directory -Force -Path (Join-Path $KeepLockDir 'src') | Out-Null
+        @"
+program:
+  name: keep-lock
+  version: 0.1.0
+  entry: src/main.pas
+  toolchain:
+    fpc: $CandidateLspFpcVersion
+  build:
+    unitPaths: [src]
+  dependencies:
+    shared-core: $SharedUrl@^1.1.0
+  targets:
+    ${OtherOsTarget}:
+      dependencies:
+        mid-kit: $MidUrl@^1.0.0
+"@ | Set-Content -Path (Join-Path $KeepLockDir 'nik.yaml') -Encoding UTF8
+        @"
+program KeepLock;
+{`$mode objfpc}{`$H+}
+uses SharedCoreUnit;
+begin
+  WriteLn(GetSharedVer);
+end.
+"@ | Set-Content -Path (Join-Path $KeepLockDir 'src\main.pas') -Encoding UTF8
+        $keepFetch = (Invoke-Nik -NikHome $PkgTestHome -Arguments @('pkg', 'fetch', '-m', $KeepLockDir, '--json')).Output | ConvertFrom-Json
+        $keepLockFull = [System.IO.File]::ReadAllText((Join-Path $KeepLockDir 'nik.lock'))
+        Assert-True ($keepFetch.success -eq $true -and $keepLockFull -match 'mid-kit' -and $keepLockFull -match 'mono-suite') 'nik pkg fetch locks the dependencies and the transitive packages of every target'
+        $keepBuild = (Invoke-Nik -NikHome $PkgTestHome -Arguments @('build', '-m', $KeepLockDir, '--json')).Output | ConvertFrom-Json
+        $keepLockAfterBuild = [System.IO.File]::ReadAllText((Join-Path $KeepLockDir 'nik.lock'))
+        Assert-True ($keepBuild.success -eq $true -and $keepLockAfterBuild -match 'mid-kit' -and $keepLockAfterBuild -match 'mono-suite') 'nik build keeps the lock entries of other targets, including their transitive packages'
+
+        # 3h3. A commit pin must stay tied to the integrity recorded in nik.lock: a changed tree is an error, not a silent lock rewrite.
+        $PinLockDir = Join-Path $WorkDir 'pkg-e2e\pin-lock'
+        New-Item -ItemType Directory -Force -Path (Join-Path $PinLockDir 'src') | Out-Null
+        @"
+package:
+  name: pin-lock
+  toolchain:
+    fpc: $CandidateLspFpcVersion
+  dependencies:
+    legacy-pas:
+      url: $LegacyUrl
+      rev: $LegacyShortSha
+"@ | Set-Content -Path (Join-Path $PinLockDir 'nik.yaml') -Encoding UTF8
+        $pinFetch = (Invoke-Nik -NikHome $PkgTestHome -Arguments @('pkg', 'fetch', '-m', $PinLockDir, '--json')).Output | ConvertFrom-Json
+        Assert-True ($pinFetch.success -eq $true) 'nik pkg fetch locks a commit-pinned dependency'
+        $pinLockPath = Join-Path $PinLockDir 'nik.lock'
+        $pinLockText = [System.IO.File]::ReadAllText($pinLockPath)
+        $pinIntegrity = [regex]::Match($pinLockText, 'integrity:\s*"?sha256-([0-9a-f]{64})').Groups[1].Value
+        Assert-True ($pinIntegrity.Length -eq 64) 'nik.lock records the tree integrity of the pinned dependency'
+        $tamperedIntegrity = ('0' * 64)
+        $tamperedLock = $pinLockText.Replace($pinIntegrity, $tamperedIntegrity)
+        [System.IO.File]::WriteAllText($pinLockPath, $tamperedLock)
+        $pinUpdate = Invoke-Nik -NikHome $PkgTestHome -Arguments @('pkg', 'update', 'legacy-pas', '-m', $PinLockDir, '--json') -AllowFailure
+        $lockAfterPinUpdate = [System.IO.File]::ReadAllText($pinLockPath)
+        Assert-True ($pinUpdate.ExitCode -ne 0 -and $pinUpdate.Output -match 'integrity mismatch') 'nik pkg update refuses a commit-pinned dependency whose tree differs from the integrity in nik.lock'
+        Assert-True ($lockAfterPinUpdate -eq $tamperedLock) 'A failed nik pkg update leaves nik.lock untouched'
+
         # 3i. Incompatible SemVer major conflict (^2.0.0 vs mid-kit ^1.2.0) reports clear dependency chains
         @"
 package:
