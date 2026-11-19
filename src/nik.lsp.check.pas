@@ -585,7 +585,7 @@ var
   ManifestFile, EffProfile, CleanErr, FallbackHostVer: string;
   Parsed: TParsedManifest;
   ResolvedCfg: TResolvedManifest;
-  ForTestFlag, LoadedFromManifest: Boolean;
+  ForTestFlag, LoadedFromManifest, DummyAutoInstalled: Boolean;
   I, ErrLine0: Integer;
   PkgOpts: TPackageResolveOptions;
   PkgRes: TPackageResolutionResult;
@@ -625,7 +625,11 @@ begin
 
       if (Trim(ResolvedCfg.FpcSpec) = '') and TryDetectInstalledHostVersion(FallbackHostVer) then
         ResolvedCfg.FpcSpec := FallbackHostVer;
-      AContext.Sdk := RequireInstalledSdkForTarget(ResolvedCfg.FpcSpec, ResolvedCfg.TargetSpec);
+      // Never auto-install SDKs silently inside nik lsp (AutoInstallSdk = False, Offline = True)
+      AContext.Sdk := ResolveProjectSdk(
+        ResolvedCfg.FpcSpec, ResolvedCfg.TargetSpec,
+        False, True, True, DummyAutoInstalled
+      );
       ResolvedCfg := ResolveManifestConfig(
         Parsed, EffProfile,
         AContext.Sdk.Manifest.TargetCpu, AContext.Sdk.Manifest.TargetOs, ForTestFlag,

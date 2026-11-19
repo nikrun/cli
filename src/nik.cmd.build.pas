@@ -27,7 +27,7 @@ begin
   WriteLn('  -m, --manifest <PATH>  Path to nik.yaml or project directory');
   WriteLn('      --clean            Clean profile build cache (.nik/cache) and force rebuild (-B)');
   WriteLn('      --locked           Require nik.lock to be up to date without modifying it');
-  WriteLn('      --offline          Resolve dependencies strictly from ~/.nikrun/cache/pkg without network');
+  WriteLn('      --offline          Use only locally installed SDKs and cached packages without network');
   WriteLn('  -v, --verbose          Show full compiler invocation and note/hint diagnostics');
   WriteLn('      --json             Output structured JSON build report and diagnostics');
   WriteLn('  -h, --help             Show this help message');
@@ -173,6 +173,8 @@ begin
     ToolObj.Add('sdkId', ARes.Sdk.Manifest.SdkId);
     ToolObj.Add('fpcVersion', ARes.Sdk.Manifest.FpcVersion);
     ToolObj.Add('targetTriplet', ARes.Sdk.Manifest.TargetTriplet);
+    ToolObj.Add('installPath', ARes.Sdk.InstallPath);
+    ToolObj.Add('sdkInstalled', ARes.SdkAutoInstalled);
     ToolObj.Add('compilerBinary', ARes.Compile.Spec.CompilerBinary);
     ToolObj.Add('fpcCfg', ARes.Compile.Spec.FpcCfgPath);
     Root.Add('toolchain', ToolObj);
@@ -215,7 +217,8 @@ begin
   end;
 end;
 
-procedure EmitPreflightErrorJson(const AErrorMsg: string; AExitCode: Integer);
+procedure EmitPreflightErrorJson(const AErrorMsg: string; AExitCode: Integer;
+  ASdkAutoInstalled: Boolean);
 var
   Root: TJSONObject;
 begin
@@ -223,6 +226,7 @@ begin
   try
     Root.Add('success', False);
     Root.Add('exitCode', AExitCode);
+    Root.Add('sdkInstalled', ASdkAutoInstalled);
     Root.Add('error', AErrorMsg);
     Root.Add('diagnostics', TJSONArray.Create);
     WriteJson(Root);
@@ -235,7 +239,7 @@ function ExecuteBuildCommand(const AArgs: array of string): Integer;
 var
   I, HiddenNotes: Integer;
   Arg, Val, ExplicitProfile: string;
-  FlagClean, FlagVerbose, FlagJson: Boolean;
+  FlagClean, FlagVerbose, FlagJson, SdkAutoInstalled: Boolean;
   TargetOpts: TProjectTargetOptions;
   Prepared: TPreparedProjectTarget;
   Res: TProjectCompileResult;
@@ -246,6 +250,7 @@ begin
   FlagClean := False;
   FlagVerbose := False;
   FlagJson := False;
+  SdkAutoInstalled := False;
   TargetOpts := Default(TProjectTargetOptions);
   TargetOpts.Role := ptrMainArtifact;
 
@@ -289,15 +294,17 @@ begin
     TargetOpts.ProfileName := 'debug';
 
   TargetOpts.Clean := FlagClean;
+  TargetOpts.AutoInstallSdk := not TargetOpts.Offline;
+  TargetOpts.QuietSdkInstall := FlagJson;
 
   try
-    Prepared := PrepareProjectTarget(TargetOpts);
+    Prepared := PrepareProjectTarget(TargetOpts, SdkAutoInstalled);
   except
     on E: ENikError do
     begin
       if FlagJson then
       begin
-        EmitPreflightErrorJson(E.Message, E.ExitCode);
+        EmitPreflightErrorJson(E.Message, E.ExitCode, SdkAutoInstalled);
         Exit(E.ExitCode);
       end;
       raise;

@@ -33,7 +33,7 @@ function MatchRemoteSdkInstallState(const AInstalled: TInstalledSdkArray;
   out AUpdateAvailable: Boolean): Boolean;
 
 function InstallSdk(const ASpec, ATargetOs, ATargetCpu, AIndexUrl: string;
-  AExplicitArch, AForce, ASkipVerify: Boolean): TInstalledSdk;
+  AExplicitArch, AForce, ASkipVerify: Boolean; AQuiet: Boolean = False): TInstalledSdk;
 
 function UpdateSdks(const AVersion, ATargetOs, ATargetCpu, AIndexUrl: string;
   ASkipVerify, AQuiet: Boolean): TSdkUpdateItemArray;
@@ -629,7 +629,8 @@ begin
   end;
 end;
 
-function FinalizeSdkFromDirectory(const ASourceDir: string; AForce: Boolean): TInstalledSdk;
+function FinalizeSdkFromDirectory(const ASourceDir: string; AForce: Boolean;
+  AQuiet: Boolean = False): TInstalledSdk;
 var
   StagingDir, DestDir, FpcBinPath, CfgPath, NormSrc, NormDest: string;
   Manifest: TSdkManifest;
@@ -653,8 +654,9 @@ begin
     begin
       if not AForce then
       begin
-        WriteInfo(Format('SDK ''%s'' is already installed at %s (use --force to reinstall).',
-          [Manifest.SdkId, DestDir]));
+        if not AQuiet then
+          WriteInfo(Format('SDK ''%s'' is already installed at %s (use --force to reinstall).',
+            [Manifest.SdkId, DestDir]));
         Result.Manifest := Manifest;
         Result.InstallPath := DestDir;
         Exit;
@@ -667,7 +669,8 @@ begin
       DeleteDirectoryRecursive(StagingDir);
 
     try
-      WriteStep('Copying local SDK directory...');
+      if not AQuiet then
+        WriteStep('Copying local SDK directory...');
       CopyDirectoryRecursive(ASourceDir, StagingDir);
       MoveDirectoryAtomic(StagingDir, DestDir);
     finally
@@ -680,8 +683,11 @@ begin
     EnsureBinariesExecutable(JoinPath(DestDir, Manifest.Paths.BinDir));
 
   CfgPath := GenerateFpcCfgForSdk(DestDir, Manifest);
-  WriteSuccess('Installed SDK to: ' + DestDir);
-  WriteSuccess('Generated isolated fpc.cfg: ' + CfgPath);
+  if not AQuiet then
+  begin
+    WriteSuccess('Installed SDK to: ' + DestDir);
+    WriteSuccess('Generated isolated fpc.cfg: ' + CfgPath);
+  end;
 
   Result.Manifest := Manifest;
   Result.InstallPath := DestDir;
@@ -756,7 +762,7 @@ begin
 end;
 
 function InstallSdk(const ASpec, ATargetOs, ATargetCpu, AIndexUrl: string;
-  AExplicitArch, AForce, ASkipVerify: Boolean): TInstalledSdk;
+  AExplicitArch, AForce, ASkipVerify: Boolean; AQuiet: Boolean): TInstalledSdk;
 var
   LocalPath, DestDir, CfgPath: string;
   Index: TSdkIndex;
@@ -773,15 +779,17 @@ begin
     LocalPath := ExpandFileName(NormalizeNativeSeparators(Trim(ASpec)));
     if DirectoryExists(LocalPath) then
     begin
-      WriteStep(Format('Installing Free Pascal SDK from local directory: %s', [LocalPath]));
-      Result := FinalizeSdkFromDirectory(LocalPath, AForce);
+      if not AQuiet then
+        WriteStep(Format('Installing Free Pascal SDK from local directory: %s', [LocalPath]));
+      Result := FinalizeSdkFromDirectory(LocalPath, AForce, AQuiet);
       Exit;
     end;
 
     if FileExists(LocalPath) then
     begin
-      WriteStep(Format('Installing Free Pascal SDK from local archive: %s', [ExtractFileName(LocalPath)]));
-      Result := FinalizeSdkFromZip(LocalPath, '', AForce, ASkipVerify);
+      if not AQuiet then
+        WriteStep(Format('Installing Free Pascal SDK from local archive: %s', [ExtractFileName(LocalPath)]));
+      Result := FinalizeSdkFromZip(LocalPath, '', AForce, ASkipVerify, AQuiet);
       Exit;
     end;
 
@@ -795,11 +803,12 @@ begin
       [Trim(ASpec)]);
 
   // Case 2: Remote resolution by FPC version via index.json
-  WriteStep('Fetching remote SDK index...');
+  if not AQuiet then
+    WriteStep('Fetching remote SDK index...');
   Index := FetchRemoteSdkIndex(AIndexUrl);
   Entry := ResolveRemoteSdkSpec(Index, ASpec, ATargetOs, ATargetCpu, AExplicitArch, UsedFallback);
 
-  if UsedFallback then
+  if UsedFallback and (not AQuiet) then
     WriteInfo('Note: Using x86_64-win64 SDK on Windows ARM64 (runs seamlessly under emulation).');
 
   DestDir := JoinPath(GetNikrunSdksDir, Entry.SdkId);
@@ -809,15 +818,18 @@ begin
     if not FileExists(CfgPath) then
       GenerateFpcCfgForSdk(DestDir, ExistingManifest);
 
-    WriteSuccess(Format('SDK ''%s'' is already installed at %s', [Entry.SdkId, DestDir]));
-    WriteInfo('Pass --force to re-download and reinstall.');
+    if not AQuiet then
+    begin
+      WriteSuccess(Format('SDK ''%s'' is already installed at %s', [Entry.SdkId, DestDir]));
+      WriteInfo('Pass --force to re-download and reinstall.');
+    end;
 
     Result.Manifest := ExistingManifest;
     Result.InstallPath := DestDir;
     Exit;
   end;
 
-  Result := DownloadAndInstallRemoteEntry(Entry, AForce, ASkipVerify, False);
+  Result := DownloadAndInstallRemoteEntry(Entry, AForce, ASkipVerify, AQuiet);
 end;
 
 type

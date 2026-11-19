@@ -78,6 +78,7 @@ flowchart TB
 
     SDKM <-->|"Download & Verify SHA-256"| REG
     SDKM --> SDKS
+    BUILD -.->|"Auto-Install Missing SDK"| SDKM
     BUILD --> FPC
     BUILD --> PPU
     LSP --> SRC
@@ -101,9 +102,9 @@ nik sdk uninstall 3.3.1          # Remove an installed SDK
 nik init my-app                  # Scaffold a program project (applies ~/.nikrun/template.yaml if present)
 nik init my-lib --lib            # Scaffold a shared library (.dll / .so / .dylib)
 nik init my-units --pkg          # Scaffold a source-first Object Pascal package
-nik build                        # Compile using nik.yaml (automatically fetches & locks dependencies)
+nik build                        # Compile using nik.yaml (auto-installs missing SDK & hydrates dependencies)
 nik build -p release             # Optimized release build (--profile release)
-nik build --locked               # CI build requiring nik.lock to be up to date
+nik build --locked --offline     # Hermetic CI/offline build using only local SDKs, nik.lock & cached packages
 nik build --clean --json         # Clean checkout cache and emit structured JSON diagnostics
 
 # Inspect, fetch & update decentralized URL/path dependencies (declared in nik.yaml)

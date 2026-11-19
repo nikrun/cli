@@ -21,12 +21,15 @@ type
     CheckOnly: Boolean;
     Locked: Boolean;
     Offline: Boolean;
+    AutoInstallSdk: Boolean;
+    QuietSdkInstall: Boolean;
   end;
 
   TPreparedProjectTarget = record
     Options: TProjectTargetOptions;
     Manifest: TResolvedManifest;
     Sdk: TInstalledSdk;
+    SdkAutoInstalled: Boolean;
     Packages: TPackageResolutionResult;
     Compile: TPreparedCompile;
   end;
@@ -34,6 +37,7 @@ type
   TProjectCompileResult = record
     Manifest: TResolvedManifest;
     Sdk: TInstalledSdk;
+    SdkAutoInstalled: Boolean;
     Packages: TPackageResolutionResult;
     Compile: TCompileResult;
   end;
@@ -42,20 +46,26 @@ function SanitizeCacheKey(const ARaw: string): string;
 function ResolveOutputBinaryPath(const AProjectDir, ARawOutput, ATargetOs: string;
   AArtifactKind: TCompileArtifactKind): string;
 
+function ResolveProjectSdk(const AFpcSpec, ATargetSpec: string;
+  AAutoInstall, AOffline, AQuietInstall: Boolean;
+  out AAutoInstalled: Boolean): TInstalledSdk;
+
 function BuildCompileSpecFromManifest(const AManifest: TResolvedManifest;
   const ASdk: TInstalledSdk; const AFpcCfgPath: string;
   const APackages: TPackageResolutionResult;
   AArtifactKind: TCompileArtifactKind; AClean: Boolean;
   const ACacheSuffix: string = ''): TCompileSpec;
 
-function PrepareProjectTarget(const AOptions: TProjectTargetOptions): TPreparedProjectTarget;
+function PrepareProjectTarget(const AOptions: TProjectTargetOptions): TPreparedProjectTarget; overload;
+function PrepareProjectTarget(const AOptions: TProjectTargetOptions;
+  out ASdkAutoInstalled: Boolean): TPreparedProjectTarget; overload;
 function ExecuteProjectTarget(const APrepared: TPreparedProjectTarget): TProjectCompileResult;
 function CompileProjectTarget(const AOptions: TProjectTargetOptions): TProjectCompileResult;
 
 implementation
 
 uses
-  nik.platform, nik.paths, nik.sdk.config, nik.sdk.manager,
+  nik.platform, nik.paths, nik.term, nik.sdk.config, nik.sdk.manager,
   nik.manifest.io, nik.manifest.resolve, nik.compiler, nik.pkg.resolve;
 
 function SanitizeCacheKey(const ARaw: string): string;
@@ -365,7 +375,51 @@ begin
   Result.ExtraArgs := Copy(AManifest.FpcArgs);
 end;
 
-function PrepareProjectTarget(const AOptions: TProjectTargetOptions): TPreparedProjectTarget;
+function ResolveProjectSdk(const AFpcSpec, ATargetSpec: string;
+  AAutoInstall, AOffline, AQuietInstall: Boolean;
+  out AAutoInstalled: Boolean): TInstalledSdk;
+var
+  TrimmedVer, EffTarget, InstallTargetCpu, InstallTargetOs: string;
+  ExplicitArch: Boolean;
+begin
+  AAutoInstalled := False;
+  TrimmedVer := Trim(AFpcSpec);
+
+  if (TrimmedVer = '') or (not IsExactFpcVersion(TrimmedVer)) then
+    Exit(RequireInstalledSdkForTarget(AFpcSpec, ATargetSpec));
+
+  if TryResolveInstalledSdkForTarget(TrimmedVer, ATargetSpec, Result) then
+    Exit;
+
+  if (not AAutoInstall) or AOffline then
+    Exit(RequireInstalledSdkForTarget(TrimmedVer, ATargetSpec));
+
+  EffTarget := LowerCase(Trim(ATargetSpec));
+  if (EffTarget = '') or (EffTarget = 'native') then
+  begin
+    InstallTargetOs := '';
+    InstallTargetCpu := '';
+    ExplicitArch := False;
+    if not AQuietInstall then
+      WriteInfo(Format('Required Free Pascal SDK %s is not installed locally — installing into %s...',
+        [TrimmedVer, GetNikrunSdksDir]));
+  end
+  else
+  begin
+    SplitTripletSpec(EffTarget, InstallTargetCpu, InstallTargetOs);
+    ExplicitArch := True;
+    if not AQuietInstall then
+      WriteInfo(Format('Required Free Pascal SDK %s (%s) is not installed locally — installing into %s...',
+        [TrimmedVer, EffTarget, GetNikrunSdksDir]));
+  end;
+
+  Result := InstallSdk(TrimmedVer, InstallTargetOs, InstallTargetCpu,
+    '', ExplicitArch, False, False, AQuietInstall);
+  AAutoInstalled := True;
+end;
+
+function PrepareProjectTarget(const AOptions: TProjectTargetOptions;
+  out ASdkAutoInstalled: Boolean): TPreparedProjectTarget;
 var
   ManifestFile, EffFpcSpec, EffTargetSpec, PreCpu, PreOs, SdkBinDir, FpcCfgPath: string;
   ParsedManifest: TParsedManifest;
@@ -374,6 +428,7 @@ var
   PkgOpts: TPackageResolveOptions;
   Spec: TCompileSpec;
 begin
+  ASdkAutoInstalled := False;
   Result := Default(TPreparedProjectTarget);
   Result.Options := AOptions;
 
@@ -397,8 +452,10 @@ begin
       '%s:%d: ''package'' defines a source unit package without a binary target (build a consuming ''program'' or ''library'' instead).',
       [ParsedManifest.ManifestPath, ParsedManifest.RootLine]);
 
-  // 2. Resolve required SDK & ensure isolated fpc.cfg
-  Result.Sdk := RequireInstalledSdkForTarget(Result.Manifest.FpcSpec, Result.Manifest.TargetSpec);
+  // 2. Resolve required SDK (auto-installing when enabled & online) & ensure isolated fpc.cfg
+  Result.Sdk := ResolveProjectSdk(Result.Manifest.FpcSpec, Result.Manifest.TargetSpec,
+    AOptions.AutoInstallSdk, AOptions.Offline, AOptions.QuietSdkInstall, ASdkAutoInstalled);
+  Result.SdkAutoInstalled := ASdkAutoInstalled;
   SdkBinDir := JoinPath(Result.Sdk.InstallPath, Result.Sdk.Manifest.Paths.BinDir);
   FpcCfgPath := JoinPath(SdkBinDir, 'fpc.cfg');
   if not FileExists(FpcCfgPath) then
@@ -430,11 +487,19 @@ begin
   Result.Compile := PrepareCompile(Spec);
 end;
 
+function PrepareProjectTarget(const AOptions: TProjectTargetOptions): TPreparedProjectTarget;
+var
+  DummyAutoInstalled: Boolean;
+begin
+  Result := PrepareProjectTarget(AOptions, DummyAutoInstalled);
+end;
+
 function ExecuteProjectTarget(const APrepared: TPreparedProjectTarget): TProjectCompileResult;
 begin
   Result := Default(TProjectCompileResult);
   Result.Manifest := APrepared.Manifest;
   Result.Sdk := APrepared.Sdk;
+  Result.SdkAutoInstalled := APrepared.SdkAutoInstalled;
   Result.Packages := APrepared.Packages;
   Result.Compile := ExecuteCompile(APrepared.Compile);
 end;

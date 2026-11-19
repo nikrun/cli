@@ -82,6 +82,53 @@ function Invoke-Nik {
     }
 }
 
+function Invoke-NikSplitStreams {
+    param(
+        [string]$NikHome,
+        [string[]]$Arguments,
+        [hashtable]$EnvVars = @{},
+        [switch]$AllowFailure
+    )
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $NikExe
+    $allArgs = @('--no-color', '--nikrun-home', $NikHome) + $Arguments
+    $escapedArgs = $allArgs | ForEach-Object {
+        if ($_ -match '[\s"]') {
+            '"' + ($_.Replace('"', '\"')) + '"'
+        } else {
+            $_
+        }
+    }
+    $psi.Arguments = ($escapedArgs -join ' ')
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.CreateNoWindow = $true
+
+    foreach ($kv in $EnvVars.GetEnumerator()) {
+        $psi.EnvironmentVariables[$kv.Key] = [string]$kv.Value
+    }
+
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
+    $stderrTask = $proc.StandardError.ReadToEndAsync()
+    $proc.WaitForExit()
+    $stdoutText = $stdoutTask.GetAwaiter().GetResult()
+    $stderrText = $stderrTask.GetAwaiter().GetResult()
+    $code = $proc.ExitCode
+
+    if ((-not $AllowFailure) -and ($code -ne 0)) {
+        throw "Command failed (exit $code): nik $($Arguments -join ' ')`nSTDOUT:`n$stdoutText`nSTDERR:`n$stderrText"
+    }
+
+    return [PSCustomObject]@{
+        ExitCode = $code
+        StdOut   = $stdoutText
+        StdErr   = $stderrText
+    }
+}
+
 # Detect host OS & CPU matching nik.platform.pas
 if ($IsWin) {
     $HostOs = 'win64'
@@ -638,6 +685,49 @@ program:
     $badTargetRes = Invoke-Nik -NikHome $TestHome -Arguments @('build', '-m', $BadTargetDir) -AllowFailure
     Assert-True ($badTargetRes.ExitCode -ne 0 -and $badTargetRes.Output -match "Unknown target selector 'windwos'" -and $badTargetRes.Output -match "did you mean 'windows'") "nik build detects target selector typos in 'targets'"
 
+    # 13g. nik build automatic missing-SDK provisioning via mock index, --offline guard & --json stdout purity
+    $AutoMockHome = Join-Path $WorkDir 'nikrun-auto-mock-home'
+    $AutoMockProj = Join-Path $WorkDir 'auto-mock-proj'
+    $AutoCorruptProj = Join-Path $WorkDir 'auto-corrupt-proj'
+    New-Item -ItemType Directory -Force -Path $AutoMockHome, $AutoMockProj, $AutoCorruptProj | Out-Null
+
+    @"
+program:
+  name: auto-mock-app
+  entry: missing_entry.pas
+  toolchain:
+    fpc: 3.2.2
+"@ | Set-Content -Path (Join-Path $AutoMockProj 'nik.yaml') -Encoding UTF8
+
+    # --offline must NEVER touch the network (even with an unreachable index URL) and must report missing local SDK cleanly
+    $offlineMissHuman = Invoke-NikSplitStreams -NikHome $AutoMockHome -Arguments @('build', '-m', $AutoMockProj, '--offline') -EnvVars @{ NIKRUN_SDK_INDEX_URL = 'http://127.0.0.1:1/unreachable-index.json' } -AllowFailure
+    Assert-True ($offlineMissHuman.ExitCode -ne 0 -and $offlineMissHuman.StdErr -match "Installed Free Pascal SDK '3\.2\.2' not found" -and -not (Test-Path (Join-Path $AutoMockHome 'sdks'))) 'nik build --offline fails cleanly without network access when required SDK is missing locally'
+
+    $offlineMissJsonRaw = Invoke-NikSplitStreams -NikHome $AutoMockHome -Arguments @('build', '-m', $AutoMockProj, '--offline', '--json') -EnvVars @{ NIKRUN_SDK_INDEX_URL = 'http://127.0.0.1:1/unreachable-index.json' } -AllowFailure
+    Assert-True ($offlineMissJsonRaw.ExitCode -ne 0 -and [string]::IsNullOrWhiteSpace($offlineMissJsonRaw.StdErr)) 'nik build --offline --json keeps stderr clean and emits structured error on stdout'
+    $offlineMissJson = $offlineMissJsonRaw.StdOut.Trim() | ConvertFrom-Json
+    Assert-True ($offlineMissJson.success -eq $false -and $offlineMissJson.sdkInstalled -eq $false -and $offlineMissJson.error -match "Installed Free Pascal SDK '3\.2\.2' not found") 'nik build --offline --json reports sdkInstalled=false and missing local SDK error'
+
+    # Corrupted SHA-256 archive must be rejected during nik build auto-install with clean JSON stdout
+    @"
+program:
+  name: auto-corrupt-app
+  entry: main.pas
+  toolchain:
+    fpc: 9.9.9
+"@ | Set-Content -Path (Join-Path $AutoCorruptProj 'nik.yaml') -Encoding UTF8
+    $corruptBuildRaw = Invoke-NikSplitStreams -NikHome $AutoMockHome -Arguments @('build', '-m', $AutoCorruptProj, '--json') -EnvVars @{ NIKRUN_SDK_INDEX_URL = $IndexUrl } -AllowFailure
+    Assert-True ($corruptBuildRaw.ExitCode -ne 0 -and [string]::IsNullOrWhiteSpace($corruptBuildRaw.StdErr)) 'nik build --json keeps stdout/stderr clean when auto-installed SDK fails SHA-256 verification'
+    $corruptBuildJson = $corruptBuildRaw.StdOut.Trim() | ConvertFrom-Json
+    Assert-True ($corruptBuildJson.success -eq $false -and $corruptBuildJson.sdkInstalled -eq $false -and $corruptBuildJson.error -match 'SHA-256 checksum mismatch' -and -not (Test-Path (Join-Path (Join-Path $AutoMockHome 'sdks') $MockBad.SdkId))) 'nik build rejects auto-downloaded SDK archive with invalid SHA-256 checksum'
+
+    # Online nik build --json downloads, SHA-256-verifies & installs missing 3.2.2 SDK without polluting stdout, and reports sdkInstalled=true even when entry file fails afterwards
+    $autoMockJsonRaw = Invoke-NikSplitStreams -NikHome $AutoMockHome -Arguments @('build', '-m', $AutoMockProj, '--json') -EnvVars @{ NIKRUN_SDK_INDEX_URL = $IndexUrl } -AllowFailure
+    Assert-True ($autoMockJsonRaw.ExitCode -ne 0 -and [string]::IsNullOrWhiteSpace($autoMockJsonRaw.StdErr) -and $autoMockJsonRaw.StdOut.Trim() -notmatch "[\r\n]") 'nik build --json auto-installing missing SDK emits single-line valid JSON on stdout with zero progress noise'
+    $autoMockJson = $autoMockJsonRaw.StdOut.Trim() | ConvertFrom-Json
+    Assert-True ($autoMockJson.sdkInstalled -eq $true -and $autoMockJson.error -match 'Entry source file not found') 'nik build --json reports sdkInstalled=true when SDK was provisioned before subsequent preflight error'
+    Assert-True (Test-Path ([System.IO.Path]::Combine($AutoMockHome, 'sdks', $Mock322.SdkId, 'bin', $Mock322.TargetTriplet, 'fpc.cfg'))) 'Auto-installed mock SDK contains generated isolated fpc.cfg in ~/.nikrun/sdks'
+
     # 14. End-to-end real FPC SDK archive install + nik build tests (if dist/, .work/sdk-cache/, or -RealSdkZipPath exists)
     if (-not $SkipRealArchive) {
         $RealZip = if (-not [string]::IsNullOrWhiteSpace($RealSdkZipPath) -and (Test-Path $RealSdkZipPath)) {
@@ -673,9 +763,57 @@ program:
             $quickInitRes = Invoke-Nik -NikHome $TestHome -Arguments @('init', $QuickInitDir)
             Assert-True ($quickInitRes.ExitCode -eq 0) 'nik init scaffolds runnable program project with installed real SDK'
             $quickBuild = (Invoke-Nik -NikHome $TestHome -Arguments @('build', '-m', $QuickInitDir, '--json')).Output | ConvertFrom-Json
-            Assert-True ($quickBuild.success -eq $true -and (Test-Path $quickBuild.output.binaryPath)) 'nik build compiles freshly initialized nik init project out of the box'
+            Assert-True ($quickBuild.success -eq $true -and $quickBuild.toolchain.sdkInstalled -eq $false -and (Test-Path $quickBuild.output.binaryPath)) 'nik build compiles freshly initialized nik init project out of the box (sdkInstalled=false when already present)'
             $quickOut = (& $quickBuild.output.binaryPath).Trim()
             Assert-True ($quickOut -eq 'Hello from quick-init-app!') "Compiled nik init starter binary runs cleanly ($quickOut)"
+
+            # End-to-end nik build auto-install of a real missing FPC SDK via local HTTP index (--offline vs --json vs cached second run)
+            $RealServerZipPath = Join-Path $ServerDir $RealZip.Name
+            if (-not (Test-Path $RealServerZipPath)) {
+                Copy-Item -Force $RealZip.FullName $RealServerZipPath
+            }
+            $RealZipSha = (Get-FileHash -Path $RealServerZipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            $RealZipLen = (Get-Item $RealServerZipPath).Length
+            $RealIndexObj = [ordered]@{
+                schemaVersion = 1
+                releaseTag    = 'fpc-sdk-real-e2e'
+                updatedAtUtc  = '2026-11-19T12:00:00Z'
+                sdks          = @(
+                    [ordered]@{
+                        sdkId         = [string]$realInfo.sdkId
+                        fpcVersion    = [string]$realInfo.fpcVersion
+                        gitRef        = [string]$realInfo.gitRef
+                        gitCommit     = [string]$realInfo.gitCommit
+                        targetOs      = [string]$realInfo.targetOs
+                        targetCpu     = [string]$realInfo.targetCpu
+                        targetTriplet = [string]$realInfo.targetTriplet
+                        builtAtUtc    = '2026-11-19T12:00:00Z'
+                        fileName      = $RealZip.Name
+                        sizeBytes     = $RealZipLen
+                        sha256        = $RealZipSha
+                        downloadUrl   = "$BaseUrl/$($RealZip.Name)"
+                    }
+                )
+            }
+            $RealIndexObj | ConvertTo-Json -Depth 6 | Set-Content -Path (Join-Path $ServerDir 'real-sdk-index.json') -Encoding UTF8
+            $RealIndexUrl = "$BaseUrl/real-sdk-index.json"
+
+            $AutoRealHome = Join-Path $WorkDir 'nikrun-auto-real-home'
+            New-Item -ItemType Directory -Force -Path $AutoRealHome | Out-Null
+
+            $autoRealOffline = Invoke-NikSplitStreams -NikHome $AutoRealHome -Arguments @('build', '-m', $QuickInitDir, '--offline') -EnvVars @{ NIKRUN_SDK_INDEX_URL = $RealIndexUrl } -AllowFailure
+            Assert-True ($autoRealOffline.ExitCode -ne 0 -and $autoRealOffline.StdErr -match "Installed Free Pascal SDK '$([regex]::Escape($realFpcVersion))' not found" -and -not (Test-Path (Join-Path $AutoRealHome 'sdks'))) 'nik build --offline refuses to download real SDK into empty NIKRUN_HOME'
+
+            $autoRealFirst = Invoke-NikSplitStreams -NikHome $AutoRealHome -Arguments @('build', '-m', $QuickInitDir, '--clean', '--json') -EnvVars @{ NIKRUN_SDK_INDEX_URL = $RealIndexUrl }
+            Assert-True ([string]::IsNullOrWhiteSpace($autoRealFirst.StdErr) -and $autoRealFirst.StdOut.Trim() -notmatch "[\r\n]" -and $autoRealFirst.StdOut.Trim() -match '^\{') 'nik build --json auto-installing real SDK emits pure single-line JSON on stdout with empty stderr'
+            $autoRealFirstJson = $autoRealFirst.StdOut.Trim() | ConvertFrom-Json
+            Assert-True ($autoRealFirstJson.success -eq $true -and $autoRealFirstJson.toolchain.sdkInstalled -eq $true -and $autoRealFirstJson.toolchain.fpcVersion -eq $realFpcVersion -and (Test-Path $autoRealFirstJson.toolchain.installPath) -and (Test-Path $autoRealFirstJson.toolchain.fpcCfg) -and (Test-Path $autoRealFirstJson.output.binaryPath)) 'nik build --json automatically downloads, SHA-256-verifies, configures fpc.cfg, compiles project, and sets toolchain.sdkInstalled=true'
+            $autoRealOut = (& $autoRealFirstJson.output.binaryPath).Trim()
+            Assert-True ($autoRealOut -eq 'Hello from quick-init-app!') "Binary compiled with auto-installed real SDK executes cleanly ($autoRealOut)"
+
+            $autoRealSecond = Invoke-NikSplitStreams -NikHome $AutoRealHome -Arguments @('build', '-m', $QuickInitDir, '--json') -EnvVars @{ NIKRUN_SDK_INDEX_URL = 'http://127.0.0.1:1/unreachable-index.json' }
+            $autoRealSecondJson = $autoRealSecond.StdOut.Trim() | ConvertFrom-Json
+            Assert-True ($autoRealSecondJson.success -eq $true -and $autoRealSecondJson.toolchain.sdkInstalled -eq $false) 'Subsequent nik build --json uses newly installed local SDK without network and sets toolchain.sdkInstalled=false'
 
             # Create a local 'package:' dependency + multi-profile 'program:' + shared 'library:'
             $DepDir = Join-Path $WorkDir 'ext-greeting'
@@ -862,9 +1000,11 @@ program:
             $custRunOut = (& $custBuild.output.binaryPath).Trim()
             Assert-True ($custRunOut -notmatch 'BASE' -and $custRunOut -match '\|ONLY_CUSTOM$') "Custom profile `$reset replaces base and target defines cleanly ($custRunOut)"
 
-            # 14d. Profile overriding toolchain.fpc triggers target SDK lookup
-            $missSdkRes = Invoke-Nik -NikHome $TestHome -Arguments @('build', '-m', $AppDir, '--profile', 'missing-sdk') -AllowFailure
-            Assert-True ($missSdkRes.ExitCode -ne 0 -and $missSdkRes.Output -match "Installed Free Pascal SDK '9\.8\.7' not found") 'Profile toolchain.fpc override selects profile-specific SDK version'
+            # 14d. Profile overriding toolchain.fpc triggers target SDK lookup (--offline local check & online remote index lookup)
+            $missSdkOffline = Invoke-Nik -NikHome $TestHome -Arguments @('build', '-m', $AppDir, '--profile', 'missing-sdk', '--offline') -AllowFailure
+            Assert-True ($missSdkOffline.ExitCode -ne 0 -and $missSdkOffline.Output -match "Installed Free Pascal SDK '9\.8\.7' not found") 'Profile toolchain.fpc override selects profile-specific SDK version (--offline)'
+            $missSdkOnline = Invoke-NikSplitStreams -NikHome $TestHome -Arguments @('build', '-m', $AppDir, '--profile', 'missing-sdk') -EnvVars @{ NIKRUN_SDK_INDEX_URL = $RealIndexUrl } -AllowFailure
+            Assert-True ($missSdkOnline.ExitCode -ne 0 -and $missSdkOnline.StdErr -match "No prebuilt SDK version '9\.8\.7' found") 'Profile toolchain.fpc override attempts remote lookup when online and fails cleanly if absent from index'
 
             # 14e. Shared 'library:' build produces native .dll/.so/.dylib automatically
             @"
@@ -1292,6 +1432,52 @@ end.
         Assert-True ($null -ne $ymlDiagNotif -and $ymlDiagNotif.params.diagnostics[0].source -eq 'nik.yaml' -and $ymlDiagNotif.params.diagnostics[0].message -match "use 'program'") 'nik lsp publishes helpful error diagnostic directly onto broken nik.yaml'
         $fallbackSymResp = @($sess3.Frames | Where-Object { $_.PSObject.Properties['id'] -and $_.id -eq 31 })[0]
         Assert-True ($null -ne $fallbackSymResp -and $fallbackSymResp.result[0].name -eq 'LegacyAnswer') 'nik lsp still provides Pascal symbol intelligence via fallback SDK when nik.yaml is broken'
+
+        # Session 3b: nik lsp must NEVER auto-download a missing SDK silently in the background (even when NIKRUN_SDK_INDEX_URL is valid)
+        $LspNoAutoHome = Join-Path $WorkDir 'nikrun-lsp-no-auto-home'
+        $LspMissingSdkProj = Join-Path $WorkDir 'lsp-missing-sdk-proj'
+        New-Item -ItemType Directory -Force -Path $LspNoAutoHome, $LspMissingSdkProj | Out-Null
+        @"
+program:
+  name: lsp-no-auto
+  entry: main.pas
+  toolchain:
+    fpc: 3.2.2
+"@ | Set-Content -Path (Join-Path $LspMissingSdkProj 'nik.yaml') -Encoding UTF8
+        @"
+program LspNoAuto;
+function LocalHelperValue: Integer;
+begin
+  Result := 7;
+end;
+begin
+end.
+"@ | Set-Content -Path (Join-Path $LspMissingSdkProj 'main.pas') -Encoding UTF8
+
+        $prevIdxEnv = $env:NIKRUN_SDK_INDEX_URL
+        $env:NIKRUN_SDK_INDEX_URL = $IndexUrl
+        try {
+            $noAutoRootUri = ConvertTo-FileUri $LspMissingSdkProj
+            $noAutoMainPas = Join-Path $LspMissingSdkProj 'main.pas'
+            $noAutoMainUri = ConvertTo-FileUri $noAutoMainPas
+            $noAutoMainText = [System.IO.File]::ReadAllText($noAutoMainPas)
+            $sessNoAuto = Invoke-LspSession -NikHomeDir $LspNoAutoHome -ProjectPath $LspMissingSdkProj -LogPath '' -Messages @(
+                @{ jsonrpc = '2.0'; id = 35; method = 'initialize'; params = @{ processId = $PID; rootUri = $noAutoRootUri } },
+                @{ jsonrpc = '2.0'; method = 'initialized'; params = @{} },
+                @{ jsonrpc = '2.0'; method = 'textDocument/didOpen'; params = @{ textDocument = @{ uri = $noAutoMainUri; languageId = 'objectpascal'; version = 1; text = $noAutoMainText } } },
+                @{ jsonrpc = '2.0'; id = 36; method = 'textDocument/documentSymbol'; params = @{ textDocument = @{ uri = $noAutoMainUri } } },
+                @{ jsonrpc = '2.0'; id = 37; method = 'shutdown' },
+                @{ jsonrpc = '2.0'; method = 'exit' }
+            )
+            Assert-True ($sessNoAuto.Exited -and $sessNoAuto.ExitCode -eq 0) 'nik lsp starts and shuts down cleanly when required SDK is missing locally'
+            Assert-True (-not (Test-Path (Join-Path $LspNoAutoHome 'sdks'))) 'nik lsp never downloads missing SDKs silently in the background'
+            $noAutoYmlDiag = @($sessNoAuto.Frames | Where-Object { $_.PSObject.Properties['method'] -and $_.method -eq 'textDocument/publishDiagnostics' -and $_.params.uri -match 'nik\.yaml$' })[0]
+            Assert-True ($null -ne $noAutoYmlDiag -and $noAutoYmlDiag.params.diagnostics[0].message -match "Installed Free Pascal SDK '3\.2\.2' not found") 'nik lsp reports missing SDK diagnostic on nik.yaml instead of blocking on network download'
+            $noAutoSymResp = @($sessNoAuto.Frames | Where-Object { $_.PSObject.Properties['id'] -and $_.id -eq 36 })[0]
+            Assert-True ($null -ne $noAutoSymResp -and @($noAutoSymResp.result | Where-Object { $_.name -eq 'LocalHelperValue' }).Count -eq 1) 'nik lsp still provides local AST document symbols via CodeTools even without an installed SDK'
+        } finally {
+            $env:NIKRUN_SDK_INDEX_URL = $prevIdxEnv
+        }
 
         # Session 4: Live debounced didChange overlay (unsaved buffers), exact %3A client URI preservation, and cross-unit didClose re-validation
         $GreeterPas = Join-Path $LspPkgSrc 'GreeterUnit.pas'

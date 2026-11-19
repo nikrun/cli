@@ -1,7 +1,8 @@
 changelog:
   - version: 0.2.0
     changes:
-      added: []
+      added:
+        - 'Automatically download, SHA-256-verify, and configure missing Free Pascal SDKs on `nik build` (unless `--offline` is set), with `toolchain.sdkInstalled` reporting in `nik build --json`'
       changed: []
       deprecated: []
       fixed: []
