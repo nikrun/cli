@@ -28,3 +28,6 @@ fpcdebug.txt
 Thumbs.db
 *.bak
 *~
+
+# nik project build cache
+.nik/

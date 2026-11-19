@@ -1,0 +1,26 @@
+schemaVersion: 1
+
+program:
+  name: nik
+  description: Nikrun CLI - modern zero-config toolchain for Free Pascal & Object Pascal
+  license: GPL-3.0-or-later
+  repository: https://github.com/nikrun/cli
+  entry: src/nik.pas
+  output: bin/nik
+
+  toolchain:
+    fpc: 3.3.1
+
+  build:
+    mode: objfpc
+    longStrings: true
+    unitPaths:
+      - src
+      - vendor/lazarus/components/lazutils
+      - vendor/lazarus/components/codetools
+    includePaths:
+      - vendor/lazarus/components/lazutils
+      - vendor/lazarus/components/codetools
+
+  dependencies:
+    nikrun-lsp-protocol: ./lsp-protocol
