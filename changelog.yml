@@ -2,10 +2,13 @@ changelog:
   - version: 0.2.0
     changes:
       added:
+        - 'Add `nik test` to discover, compile and run fpcunit tests: units named `*_test.pas` / `*.test.pas` next to the code are found automatically, a generated runner compiles them with the project SDK, filters select tests by id, `heaptrc` leaks fail the run, and `--list`, `--json` and `--json-stream` give machine-readable results'
+        - 'Analyze `*_test.pas` / `*.test.pas` documents in `nik lsp` in a separate test context (`test.build` unit paths and defines, `test.dependencies`) so test-only units resolve in tests but never in production code'
         - 'Automatically download, SHA-256-verify, and configure missing Free Pascal SDKs on `nik build` (unless `--offline` is set), with `toolchain.sdkInstalled` reporting in `nik build --json`'
         - 'Display installed SDK directory sizes and total disk usage in `nik sdk list` and `nik sdk info`, including `sizeBytes` and `totalSizeBytes` in `--json` output'
         - 'Add built-in `nik.yaml` manifest intelligence to `nik lsp` (`Hover` with `ppc*` flag explanations and live SDK/`nik.lock` status, context-aware key/enum/path `Completion`, dynamic `toolchain.fpc` suggestions combining installed and cached online SDKs, `DocumentSymbol` outline, and `Go to Definition`)'
       changed:
+        - 'Remove `test.entry` and `test.output` from the `test` overlay in `nik.yaml`: tests are discovered automatically and the test binary lives in the checkout-local cache'
         - 'Reject YAML anchors, aliases and tags in `nik.yaml` with a clear error (quote the value to use it literally) and accept only plain decimal integers for numeric fields'
       deprecated: []
       fixed:
