@@ -14,7 +14,7 @@
 
 > **Zero-config toolchain, SDK manager, `nik.yaml` build system, package manager, and Language Server (`nik`) for Free Pascal.**
 
-[nikrun.dev](https://nikrun.dev) · **[`nik` CLI](https://github.com/nikrun/cli)** · [Free Pascal SDKs](https://github.com/nikrun/sdk) · [VS Code Extension](https://github.com/nikrun/vscode) · [GitHub Action](https://github.com/nikrun/github-setup-nik) · [Website & Docs](https://github.com/nikrun/web) · [Brand Assets](https://github.com/nikrun/brand) · [Build Library](https://github.com/nikrun/build-lib)
+[nikrun.dev](https://nikrun.dev) · **[CLI](https://github.com/nikrun/cli)** · [Free Pascal SDKs](https://github.com/nikrun/sdk) · [VS Code Extension](https://github.com/nikrun/vscode) · [GitHub Action](https://github.com/nikrun/github-setup-nik) · [Website & Docs](https://github.com/nikrun/web) · [Brand Assets](https://github.com/nikrun/brand) · [Build Library](https://github.com/nikrun/build-lib)
 
 ---
 
