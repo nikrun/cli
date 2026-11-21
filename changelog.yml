@@ -9,7 +9,7 @@ changelog:
         - 'Add built-in `nik.yaml` manifest intelligence to `nik lsp` (`Hover` with `ppc*` flag explanations and live SDK/`nik.lock` status, context-aware key/enum/path `Completion`, dynamic `toolchain.fpc` suggestions combining installed and cached online SDKs, `DocumentSymbol` outline, and `Go to Definition`)'
       changed:
         - 'Remove `test.entry` and `test.output` from the `test` overlay in `nik.yaml`: tests are discovered automatically and the test binary lives in the checkout-local cache'
-        - 'Reject YAML anchors, aliases and tags in `nik.yaml` with a clear error (quote the value to use it literally) and accept only plain decimal integers for numeric fields'
+        - 'Read `nik.yaml` and `nik.lock` with the YAML 1.2 parser VSoft.YAML instead of a hand-written subset parser: anchors are accepted, aliases and tags are rejected with a clear error (quote the value to use it literally), numeric fields accept only plain decimal integers, and syntax errors such as tab indentation, unterminated quotes or invalid escapes in double-quoted values are reported with their line number'
       deprecated: []
       fixed:
         - 'Repair a damaged SDK installation (compiler or manifest missing) when running `nik sdk install` instead of reporting it as already installed, and replace an SDK by moving the old one aside first, so a failed `--force` or `nik sdk update` no longer leaves the machine without that SDK'

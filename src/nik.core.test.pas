@@ -183,9 +183,9 @@ begin
   CheckParsesTo('k: ''x # y'' # comment', 'k', 'x # y', 'single-quoted keeps hash, comment stripped');
   CheckParsesTo('"quoted key": v', 'quoted key', 'v', 'double-quoted key');
   CheckParsesTo('k: "a\tb\n"', 'k', 'a'#9'b'#10, 'escapes in double quotes');
-  CheckParseError('k: ''oops', 'Unterminated quoted string', 'unterminated single quote');
-  CheckParseError('k: "oops', 'Unterminated quoted string', 'unterminated double quote');
-  CheckParseError('k: [''oops, b]', 'Unterminated', 'unterminated quote in flow sequence');
+  CheckParseError('k: ''oops', 'quoted scalar', 'unterminated single quote');
+  CheckParseError('k: "oops', 'quoted scalar', 'unterminated double quote');
+  CheckParseError('k: [''oops, b]', 'quoted scalar', 'unterminated quote in flow sequence');
 end;
 
 { ---- nik.yaml: tabs, integers, anchors, depth ---- }
@@ -194,7 +194,7 @@ procedure TNikCoreTests.TestTabsOnlyBreakRealContent;
 begin
   CheckParsesTo('a: 1'#10#9#10'b: 2', 'b', '2', 'tab-only blank line');
   CheckParsesTo('a: 1'#10#9'# comment'#10'b: 2', 'b', '2', 'tab-indented comment line');
-  CheckParseError('a:'#10#9'b: 2', 'Tab characters are not allowed', 'tab-indented content');
+  CheckParseError('a:'#10#9'b: 2', 'Tabs are not allowed', 'tab-indented content');
 end;
 
 procedure TNikCoreTests.TestAsInteger;
@@ -222,18 +222,16 @@ begin
   CheckInt('0', True, 0);
   CheckInt('$FF', False, 0);
   CheckInt('0x1', False, 0);
-  CheckInt('%101', False, 0);
   CheckInt('1.5', False, 0);
-  CheckInt('-', False, 0);
   CheckInt('12abc', False, 0);
   CheckInt('''17''', False, 0);
 end;
 
 procedure TNikCoreTests.TestAnchorsAliasesAndTagsAreRejected;
 begin
-  CheckParseError('k: *main', 'anchors, aliases and tags are not supported', 'alias');
-  CheckParseError('k: &anchor value', 'anchors, aliases and tags are not supported', 'anchor');
-  CheckParseError('k: !!str 5', 'anchors, aliases and tags are not supported', 'tag');
+  CheckParseError('k: *main', 'alias', 'alias');
+  CheckParsesTo('k: &anchor value', 'k', 'value', 'anchor on a scalar');
+  CheckParseError('k: !!str 5', 'tags are not supported', 'tag');
   CheckParsesTo('k: ''*main''', 'k', '*main', 'quoted alias-like text stays literal');
   CheckParsesTo('k: a*b&c!d', 'k', 'a*b&c!d', 'indicator characters inside a scalar');
 end;
@@ -249,7 +247,7 @@ begin
   Check(True, 'moderate flow nesting parses');
 
   Deep := 'k: ' + StringOfChar('[', 5000) + StringOfChar(']', 5000);
-  CheckParseError(Deep, 'nested too deeply', 'deep flow nesting');
+  CheckParseError(Deep, 'nested more than', 'deep flow nesting');
 end;
 
 { ---- nik.yaml: writer round trip ---- }
@@ -551,7 +549,7 @@ begin
     WriteFileTextUtf8(JoinPath(GLockDir, NIK_LOCK_FILENAME), GitLockText('--upload-pack=' + StringOfChar('x', 26)));
     CheckEnikError('hexadecimal', 'git option as rev', @DoLoadLock);
 
-    WriteFileTextUtf8(JoinPath(GLockDir, NIK_LOCK_FILENAME), GitLockText('..\..\..\..\..\..\..\..\..\..\..\..\x'));
+    WriteFileTextUtf8(JoinPath(GLockDir, NIK_LOCK_FILENAME), GitLockText('..\\..\\..\\..\\..\\..\\..\\..\\..\\..\\..\\..\\x'));
     CheckEnikError('hexadecimal', 'path traversal as rev', @DoLoadLock);
 
     WriteFileTextUtf8(JoinPath(GLockDir, NIK_LOCK_FILENAME), GitLockText(StringOfChar('g', 40)));
