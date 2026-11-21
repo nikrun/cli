@@ -2,6 +2,8 @@ changelog:
   - version: 0.2.0
     changes:
       added:
+        - 'Show available updates for installed SDKs in `nik sdk list` in a new `UPDATE` column (checked against the remote index, skipped silently when offline or with `--no-check`), with `updateAvailable` and `latestCommit` in `--json` output'
+        - 'Reorder the columns of `nik sdk list` (`VERSION`, `TARGET`, `COMMIT`, `UPDATE`, `PATH`, `SIZE`) and `nik sdk list --remote` (`VERSION`, `TARGET`, `COMMIT`, `INSTALLED`, `UPDATE`, `SIZE`), which now shows an available update as `-> <commit>` in its own column'
         - 'Add `nik test` to discover, compile and run fpcunit tests: units named `*_test.pas` / `*.test.pas` next to the code are found automatically, a generated runner compiles them with the project SDK, filters select tests by id, `heaptrc` leaks fail the run, and `--list`, `--json` and `--json-stream` give machine-readable results'
         - 'Analyze `*_test.pas` / `*.test.pas` documents in `nik lsp` in a separate test context (`test.build` unit paths and defines, `test.dependencies`) so test-only units resolve in tests but never in production code'
         - 'Automatically download, SHA-256-verify, and configure missing Free Pascal SDKs on `nik build` (unless `--offline` is set), with `toolchain.sdkInstalled` reporting in `nik build --json`'

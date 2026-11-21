@@ -1,4 +1,4 @@
-unit nik.cmd.sdk;
+﻿unit nik.cmd.sdk;
 
 {$mode objfpc}{$H+}
 
@@ -55,6 +55,7 @@ begin
   WriteLn('      --os <OS>          Filter by target OS (win64, linux, darwin)');
   WriteLn('      --arch <CPU>       Filter by target CPU (x86_64, aarch64)');
   WriteLn('      --index-url <URL>  Override remote index.json URL or file path');
+  WriteLn('      --no-check         Skip the remote update check for installed SDKs');
   WriteLn('      --json             Output machine-readable JSON');
   WriteLn('  -h, --help             Show this help message');
 end;
@@ -171,8 +172,53 @@ begin
     Result := 'unknown';
 end;
 
-function HandleListLocal(const AVersionFilter, AOsFilter, AArchFilter: string; AJson: Boolean): Integer;
+type
+  TSdkUpdateCommits = array of string;
+
+// Best-effort: for each local SDK returns the newer remote commit (or '') when the remote index
+// holds a different build for the same FPC version and target. Network errors are ignored.
+function DetectSdkUpdates(const ASdks: TInstalledSdkArray; const AIndexUrl: string): TSdkUpdateCommits;
 var
+  Index: TSdkIndex;
+  Single: TInstalledSdkArray;
+  Matched: TInstalledSdk;
+  I, J: Integer;
+  UpdAvail: Boolean;
+begin
+  Result := nil;
+  SetLength(Result, Length(ASdks));
+  if Length(ASdks) = 0 then
+    Exit;
+  try
+    Index := FetchRemoteSdkIndex(AIndexUrl);
+  except
+    Exit;
+  end;
+  Single := nil;
+  SetLength(Single, 1);
+  for I := 0 to High(ASdks) do
+  begin
+    Single[0] := ASdks[I];
+    for J := 0 to High(Index.Sdks) do
+      if SameText(Index.Sdks[J].FpcVersion, ASdks[I].Manifest.FpcVersion) and
+         SameText(Index.Sdks[J].TargetTriplet, ASdks[I].Manifest.TargetTriplet) and
+         MatchRemoteSdkInstallState(Single, Index.Sdks[J], Matched, UpdAvail) and UpdAvail then
+      begin
+        Result[I] := Index.Sdks[J].GitCommit;
+        if Result[I] = '' then
+          Result[I] := Index.Sdks[J].SdkId;
+        Break;
+      end;
+  end;
+end;
+
+function HandleListLocal(const AVersionFilter, AOsFilter, AArchFilter, AIndexUrl: string;
+  AJson, ANoCheck: Boolean): Integer;
+var
+  Updates: TSdkUpdateCommits;
+  AnyUpdate: Boolean;
+  WUpdate, WPath: Integer;
+  UpdStr: string;
   AllInstalled, Filtered: TInstalledSdkArray;
   Sizes: array of Int64;
   TotalSizeBytes: Int64;
@@ -203,6 +249,16 @@ begin
     Inc(Count);
   end;
 
+  Updates := nil;
+  if ANoCheck then
+    SetLength(Updates, Length(Filtered))
+  else
+    Updates := DetectSdkUpdates(Filtered, AIndexUrl);
+  AnyUpdate := False;
+  for I := 0 to High(Updates) do
+    if Updates[I] <> '' then
+      AnyUpdate := True;
+
   SetLength(Sizes, Length(Filtered));
   for I := 0 to High(Filtered) do
   begin
@@ -230,6 +286,11 @@ begin
         ItemObj.Add('builtAtUtc', Filtered[I].Manifest.BuiltAtUtc);
         ItemObj.Add('installPath', Filtered[I].InstallPath);
         ItemObj.Add('sizeBytes', Sizes[I]);
+        ItemObj.Add('updateAvailable', Updates[I] <> '');
+        if Updates[I] <> '' then
+          ItemObj.Add('latestCommit', Updates[I])
+        else
+          ItemObj.Add('latestCommit', TJSONNull.Create);
         Arr.Add(ItemObj);
       end;
       Root.Add('sdks', Arr);
@@ -252,34 +313,51 @@ begin
   WTarget  := Length('TARGET');
   WCommit  := Length('COMMIT');
   WSize    := Length('SIZE');
+  WUpdate  := Length('UPDATE');
+  WPath    := Length('PATH');
 
   for I := 0 to High(Filtered) do
   begin
+    if Updates[I] <> '' then
+      WUpdate := MaxIntVal(WUpdate, Length('-> ' + ShortCommitStr(Updates[I])));
     CommitStr := ShortCommitStr(Filtered[I].Manifest.GitCommit);
     SizeStr   := FormatByteSize(Sizes[I]);
     WVersion  := MaxIntVal(WVersion, Length(Filtered[I].Manifest.FpcVersion));
     WTarget   := MaxIntVal(WTarget, Length(Filtered[I].Manifest.TargetTriplet));
     WCommit   := MaxIntVal(WCommit, Length(CommitStr));
     WSize     := MaxIntVal(WSize, Length(SizeStr));
+    WPath     := MaxIntVal(WPath, Length(Filtered[I].InstallPath));
   end;
 
   WriteLn(StyleBold(
     PadRightStr('VERSION', WVersion + 2) +
     PadRightStr('TARGET', WTarget + 2) +
     PadRightStr('COMMIT', WCommit + 2) +
-    PadRightStr('SIZE', WSize + 2) +
-    'PATH'));
+    PadRightStr('UPDATE', WUpdate + 2) +
+    PadRightStr('PATH', WPath + 2) +
+    'SIZE'));
 
   for I := 0 to High(Filtered) do
   begin
     CommitStr := ShortCommitStr(Filtered[I].Manifest.GitCommit);
     SizeStr   := FormatByteSize(Sizes[I]);
+    if Updates[I] <> '' then
+      UpdStr := StyleYellow(PadRightStr('-> ' + ShortCommitStr(Updates[I]), WUpdate + 2))
+    else
+      UpdStr := PadRightStr('', WUpdate + 2);
     WriteLn(
       PadRightStr(Filtered[I].Manifest.FpcVersion, WVersion + 2) +
       PadRightStr(Filtered[I].Manifest.TargetTriplet, WTarget + 2) +
       StyleDim(PadRightStr(CommitStr, WCommit + 2)) +
-      PadRightStr(SizeStr, WSize + 2) +
-      StyleDim(Filtered[I].InstallPath));
+      UpdStr +
+      StyleDim(PadRightStr(Filtered[I].InstallPath, WPath + 2)) +
+      SizeStr);
+  end;
+
+  if AnyUpdate then
+  begin
+    WriteLn;
+    WriteInfo('Updates available. Run ' + StyleBold('nik sdk update') + ' to install them.');
   end;
 
   if Length(Filtered) = 1 then
@@ -300,7 +378,8 @@ var
   Filtered: TRemoteSdkArray;
   I, Count, WVersion, WTarget, WCommit, WSize: Integer;
   HasInst, UpdateAvail: Boolean;
-  CommitStr, SizeStr, InstCommitStr, InstLabel: string;
+  CommitStr, SizeStr, InstCommitStr, InstLabel, UpdLabel: string;
+  WInst, WUpd: Integer;
   Root, ItemObj: TJSONObject;
   Arr: TJSONArray;
 begin
@@ -383,10 +462,14 @@ begin
   WTarget  := Length('TARGET');
   WCommit  := Length('COMMIT');
   WSize    := Length('SIZE');
+  WInst    := Length('INSTALLED');
+  WUpd     := Length('UPDATE');
 
   for I := 0 to High(Filtered) do
   begin
     CommitStr := ShortCommitStr(Filtered[I].GitCommit);
+    WInst     := MaxIntVal(WInst, Length(CommitStr));
+    WUpd      := MaxIntVal(WUpd, Length('-> ' + CommitStr));
     SizeStr   := FormatByteSize(Filtered[I].SizeBytes);
     WVersion  := MaxIntVal(WVersion, Length(Filtered[I].FpcVersion));
     WTarget   := MaxIntVal(WTarget, Length(Filtered[I].TargetTriplet));
@@ -398,8 +481,9 @@ begin
     PadRightStr('VERSION', WVersion + 2) +
     PadRightStr('TARGET', WTarget + 2) +
     PadRightStr('COMMIT', WCommit + 2) +
-    PadRightStr('SIZE', WSize + 2) +
-    'INSTALLED'));
+    PadRightStr('INSTALLED', WInst + 2) +
+    PadRightStr('UPDATE', WUpd + 2) +
+    'SIZE'));
 
   for I := 0 to High(Filtered) do
   begin
@@ -407,27 +491,27 @@ begin
     CommitStr := ShortCommitStr(Filtered[I].GitCommit);
     SizeStr   := FormatByteSize(Filtered[I].SizeBytes);
 
+    InstLabel := PadRightStr('', WInst + 2);
+    UpdLabel  := PadRightStr('', WUpd + 2);
     if HasInst then
     begin
       InstCommitStr := ShortCommitStr(MatchedSdk.Manifest.GitCommit);
       if UpdateAvail then
-        InstLabel := StyleYellow(InstCommitStr + ' (update)')
+      begin
+        InstLabel := PadRightStr(InstCommitStr, WInst + 2);
+        UpdLabel  := StyleYellow(PadRightStr('-> ' + CommitStr, WUpd + 2));
+      end
       else
-        InstLabel := StyleGreen(InstCommitStr);
+        InstLabel := StyleGreen(PadRightStr(InstCommitStr, WInst + 2));
+    end;
 
-      WriteLn(
-        PadRightStr(Filtered[I].FpcVersion, WVersion + 2) +
-        PadRightStr(Filtered[I].TargetTriplet, WTarget + 2) +
-        StyleDim(PadRightStr(CommitStr, WCommit + 2)) +
-        PadRightStr(SizeStr, WSize + 2) +
-        InstLabel);
-    end
-    else
-      WriteLn(
-        PadRightStr(Filtered[I].FpcVersion, WVersion + 2) +
-        PadRightStr(Filtered[I].TargetTriplet, WTarget + 2) +
-        StyleDim(PadRightStr(CommitStr, WCommit + 2)) +
-        SizeStr);
+    WriteLn(
+      PadRightStr(Filtered[I].FpcVersion, WVersion + 2) +
+      PadRightStr(Filtered[I].TargetTriplet, WTarget + 2) +
+      StyleDim(PadRightStr(CommitStr, WCommit + 2)) +
+      InstLabel +
+      UpdLabel +
+      SizeStr);
   end;
 end;
 
@@ -435,8 +519,9 @@ function ExecuteSdkList(const AArgs: array of string): Integer;
 var
   I: Integer;
   Arg, Val, VersionFilter, OsFilter, ArchFilter, IndexUrl: string;
-  IsRemote, IsJson: Boolean;
+  IsRemote, IsJson, NoCheck: Boolean;
 begin
+  NoCheck := False;
   IsRemote := False;
   IsJson := False;
   VersionFilter := '';
@@ -457,6 +542,8 @@ begin
       IsRemote := True
     else if Arg = '--json' then
       IsJson := True
+    else if Arg = '--no-check' then
+      NoCheck := True
     else if Arg = '--version' then
       VersionFilter := NextOptValue(AArgs, I, '--version')
     else if SplitOptEq(Arg, '--version', Val) then
@@ -481,7 +568,7 @@ begin
   if IsRemote then
     Result := HandleListRemote(VersionFilter, OsFilter, ArchFilter, IndexUrl, IsJson)
   else
-    Result := HandleListLocal(VersionFilter, OsFilter, ArchFilter, IsJson);
+    Result := HandleListLocal(VersionFilter, OsFilter, ArchFilter, IndexUrl, IsJson, NoCheck);
 end;
 
 function ExecuteSdkInstall(const AArgs: array of string): Integer;
