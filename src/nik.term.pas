@@ -9,6 +9,7 @@ uses
 
 procedure InitTerminal(AForceNoColor: Boolean = False);
 function IsInteractiveOutput: Boolean;
+function IsInteractiveInput: Boolean;
 function ColorsEnabled: Boolean;
 
 function StyleBold(const AText: string): string;
@@ -110,6 +111,25 @@ end;
 function IsInteractiveOutput: Boolean;
 begin
   Result := GInteractiveOut;
+end;
+
+function IsInteractiveInput: Boolean;
+var
+  CiEnv: string;
+{$IFDEF WINDOWS}
+  InHandle: THandle;
+{$ENDIF}
+begin
+  CiEnv := LowerCase(Trim(SysUtils.GetEnvironmentVariable('CI')));
+  if (CiEnv <> '') and (CiEnv <> '0') and (CiEnv <> 'false') then
+    Exit(False);
+{$IFDEF WINDOWS}
+  InHandle := GetStdHandle(STD_INPUT_HANDLE);
+  Result := (InHandle <> INVALID_HANDLE_VALUE) and (InHandle <> 0) and
+            (GetFileType(InHandle) = FILE_TYPE_CHAR);
+{$ELSE}
+  Result := isatty(StdInputHandle) = 1;
+{$ENDIF}
 end;
 
 function ColorsEnabled: Boolean;

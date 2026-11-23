@@ -5,30 +5,58 @@ unit nik.cmd.build;
 interface
 
 uses
-  SysUtils, Classes;
+  SysUtils, Classes, nik.project;
 
 function ExecuteBuildCommand(const AArgs: array of string): Integer;
 procedure PrintBuildHelp;
 
+type
+  TBuildPipelineOptions = record
+    ProfileName: string;
+    Source: string;     // optional: directory, nik.yaml, Pascal file or https:// URL
+    Clean: Boolean;
+    Verbose: Boolean;
+    Json: Boolean;
+    Trust: Boolean;     // accept untrusted URL sources without prompting (run only)
+    Quiet: Boolean;     // keep stdout free of nik messages (build progress goes away, details to stderr)
+    ForRun: Boolean;    // binary will be executed afterwards (trust check, cache output)
+    Target: TProjectTargetOptions;
+  end;
+
+{ Shared by 'nik build' and 'nik run'. Returns the exit code; ABinaryPath is the built artifact. }
+function RunBuildPipeline(const AOpts: TBuildPipelineOptions; out ABinaryPath: string;
+  out AIsProgram: Boolean): Integer;
+function SplitOptEq(const AArg, AOptName: string; out AVal: string): Boolean;
+function NextOptValue(const AArgs: array of string; var AIndex: Integer; const AOptName: string): string;
+
 implementation
 
 uses
-  fpjson, nik.types, nik.term, nik.manifest.types, nik.compiler.types, nik.compiler.diag, nik.project;
+  fpjson, nik.types, nik.term, nik.paths, nik.manifest.types, nik.compiler.types, nik.compiler.diag,
+  nik.source;
 
 procedure PrintBuildHelp;
 begin
-  WriteLn(StyleBold('Compile a Free Pascal project using nik.yaml'));
+  WriteLn(StyleBold('Compile a Free Pascal project (nik.yaml), a single Pascal file or a web URL'));
   WriteLn;
   WriteLn(StyleBold('USAGE:'));
-  WriteLn('  nik build [OPTIONS]');
+  WriteLn('  nik build [OPTIONS] [SOURCE]');
+  WriteLn;
+  WriteLn(StyleBold('SOURCE:'));
+  WriteLn('  (none)                 Project in the current directory (nik.yaml)');
+  WriteLn('  <dir> | <nik.yaml>     Another project');
+  WriteLn('  <file.pas>             A single Pascal file (uses the newest installed SDK; binary in ./bin)');
+  WriteLn('  <https://...>          Git repository, or a file/directory inside one, e.g.');
+  WriteLn('                         https://github.com/owner/repo/blob/main/app.pas or ...repo@v1.2.0');
   WriteLn;
   WriteLn(StyleBold('OPTIONS:'));
   WriteLn('  -p, --profile <NAME>   Build with the named profile from nik.yaml (default: debug)');
-  WriteLn('  -m, --manifest <PATH>  Path to nik.yaml or project directory');
+  WriteLn('  -m, --manifest <PATH>  Path to nik.yaml or project directory (same as a SOURCE path)');
   WriteLn('      --clean            Clean profile build cache (.nik/cache) and force rebuild (-B)');
   WriteLn('      --locked           Require nik.lock to be up to date without modifying it');
   WriteLn('      --offline          Use only locally installed SDKs and cached packages without network');
   WriteLn('  -v, --verbose          Show full compiler invocation and note/hint diagnostics');
+  WriteLn('  -q, --quiet            No progress messages on stdout (errors and diagnostics stay on stderr)');
   WriteLn('      --json             Output structured JSON build report and diagnostics');
   WriteLn('  -h, --help             Show this help message');
   WriteLn;
@@ -38,6 +66,8 @@ begin
   WriteLn('  nik build --profile trunk');
   WriteLn('  nik build --clean --verbose');
   WriteLn('  nik build --json');
+  WriteLn('  nik build tools/gen.pas');
+  WriteLn('  nik build https://github.com/RalliKam/TWIN/blob/main/twin.pas');
 end;
 
 function SplitOptEq(const AArg, AOptName: string; out AVal: string): Boolean;
@@ -91,7 +121,7 @@ begin
     Result := Result + ' ' + QuoteArgIfNeeded(AArgs[I]);
 end;
 
-procedure PrintDiagnosticHuman(const ADiag: TCompilerDiagnostic);
+procedure PrintDiagnosticHuman(const ADiag: TCompilerDiagnostic; AToStdErr: Boolean = False);
 var
   Loc, SevLabel, CodePart: string;
 begin
@@ -134,12 +164,18 @@ begin
     dsNote:
       begin
         SevLabel := StyleDim('note' + CodePart + ':');
-        WriteLn('  ' + StyleDim(Loc) + SevLabel + ' ' + StyleDim(ADiag.Message));
+        if AToStdErr then
+          WriteLn(StdErr, '  ' + StyleDim(Loc) + SevLabel + ' ' + StyleDim(ADiag.Message))
+        else
+          WriteLn('  ' + StyleDim(Loc) + SevLabel + ' ' + StyleDim(ADiag.Message));
       end;
     dsHint:
       begin
         SevLabel := StyleDim('hint' + CodePart + ':');
-        WriteLn('  ' + StyleDim(Loc) + SevLabel + ' ' + StyleDim(ADiag.Message));
+        if AToStdErr then
+          WriteLn(StdErr, '  ' + StyleDim(Loc) + SevLabel + ' ' + StyleDim(ADiag.Message))
+        else
+          WriteLn('  ' + StyleDim(Loc) + SevLabel + ' ' + StyleDim(ADiag.Message));
       end;
   else
     raise ENikError.CreateFmt('Unsupported TDiagSeverity ordinal: %d', [Ord(ADiag.Severity)]);
@@ -235,69 +271,54 @@ begin
   end;
 end;
 
-function ExecuteBuildCommand(const AArgs: array of string): Integer;
+function RunBuildPipeline(const AOpts: TBuildPipelineOptions; out ABinaryPath: string;
+  out AIsProgram: Boolean): Integer;
 var
   I, HiddenNotes: Integer;
-  Arg, Val, ExplicitProfile: string;
   FlagClean, FlagVerbose, FlagJson, SdkAutoInstalled: Boolean;
   TargetOpts: TProjectTargetOptions;
   Prepared: TPreparedProjectTarget;
   Res: TProjectCompileResult;
   D: TCompilerDiagnostic;
   SummaryParts: string;
+  SrcOpts: TSourceOptions;
+  Resolved: TResolvedSource;
 begin
-  ExplicitProfile := '';
-  FlagClean := False;
-  FlagVerbose := False;
-  FlagJson := False;
+  ABinaryPath := '';
+  AIsProgram := False;
+  FlagClean := AOpts.Clean;
+  FlagVerbose := AOpts.Verbose;
+  FlagJson := AOpts.Json;
   SdkAutoInstalled := False;
-  TargetOpts := Default(TProjectTargetOptions);
+  TargetOpts := AOpts.Target;
   TargetOpts.Role := ptrMainArtifact;
 
-  I := 0;
-  while I <= High(AArgs) do
-  begin
-    Arg := AArgs[I];
-    if (Arg = '-h') or (Arg = '--help') or (Arg = 'help') then
-    begin
-      PrintBuildHelp;
-      Exit(0);
-    end
-    else if (Arg = '-p') or (Arg = '--profile') then
-      ExplicitProfile := NextOptValue(AArgs, I, Arg)
-    else if SplitOptEq(Arg, '--profile', Val) then
-      ExplicitProfile := Val
-    else if (Arg = '-m') or (Arg = '--manifest') then
-      TargetOpts.ManifestOverride := NextOptValue(AArgs, I, Arg)
-    else if SplitOptEq(Arg, '--manifest', Val) then
-      TargetOpts.ManifestOverride := Val
-    else if Arg = '--clean' then
-      FlagClean := True
-    else if Arg = '--locked' then
-      TargetOpts.Locked := True
-    else if Arg = '--offline' then
-      TargetOpts.Offline := True
-    else if (Arg = '-v') or (Arg = '--verbose') then
-      FlagVerbose := True
-    else if Arg = '--json' then
-      FlagJson := True
-    else if (Arg = '--release') or (Arg = '-r') then
-      raise ENikError.CreateFmt('Unknown option ''%s'' for ''nik build''. Use ''-p release'' or ''--profile release''.', [Arg])
-    else
-      raise ENikError.CreateFmt('Unknown option ''%s'' for ''nik build''. Run ''nik build --help''.', [Arg]);
-    Inc(I);
-  end;
-
-  if ExplicitProfile <> '' then
-    TargetOpts.ProfileName := ExplicitProfile
+  if AOpts.ProfileName <> '' then
+    TargetOpts.ProfileName := AOpts.ProfileName
   else
     TargetOpts.ProfileName := 'debug';
 
   TargetOpts.Clean := FlagClean;
   TargetOpts.AutoInstallSdk := not TargetOpts.Offline;
-  TargetOpts.QuietSdkInstall := FlagJson;
+  TargetOpts.QuietSdkInstall := FlagJson or AOpts.Quiet;
 
   try
+    if AOpts.Source <> '' then
+    begin
+      if TargetOpts.ManifestOverride <> '' then
+        raise ENikError.Create('Cannot combine a SOURCE argument with --manifest.');
+      SrcOpts := Default(TSourceOptions);
+      SrcOpts.Offline := TargetOpts.Offline;
+      SrcOpts.Trust := AOpts.Trust;
+      SrcOpts.ForRun := AOpts.ForRun;
+      SrcOpts.Quiet := FlagJson or AOpts.Quiet;
+      Resolved := ResolveSource(AOpts.Source, SrcOpts);
+      TargetOpts.ManifestOverride := Resolved.ManifestPath;
+      TargetOpts.EntryOverride := Resolved.EntryOverride;
+      // 'nik build <file|url>' leaves the binary in ./bin; 'nik run' keeps it in the cache.
+      if (not AOpts.ForRun) and (Resolved.DefaultOutputName <> '') then
+        TargetOpts.OutputOverride := JoinPath(JoinPath(GetCurrentDir, 'bin'), Resolved.DefaultOutputName);
+    end;
     Prepared := PrepareProjectTarget(TargetOpts, SdkAutoInstalled);
   except
     on E: ENikError do
@@ -311,7 +332,7 @@ begin
     end;
   end;
 
-  if not FlagJson then
+  if (not FlagJson) and (not AOpts.Quiet) then
   begin
     WriteStep(Format('Building %s [%s] (FPC %s, %s)...',
       [Prepared.Manifest.ProjectName, Prepared.Manifest.ProfileName,
@@ -331,6 +352,8 @@ begin
   if FlagJson then
   begin
     EmitBuildResultJson(Res);
+    ABinaryPath := Res.Compile.Spec.OutputBinaryPath;
+    AIsProgram := Res.Manifest.Kind = mkProgram;
     if Res.Compile.Success then
       Exit(0)
     else
@@ -345,7 +368,7 @@ begin
     if (D.Severity in [dsNote, dsHint]) and (not FlagVerbose) then
       Inc(HiddenNotes)
     else
-      PrintDiagnosticHuman(D);
+      PrintDiagnosticHuman(D, AOpts.Quiet);
   end;
 
   if not Res.Compile.Success then
@@ -368,8 +391,62 @@ begin
   if HiddenNotes > 0 then
     SummaryParts := SummaryParts + Format(', %d note(s)', [HiddenNotes]);
 
-  WriteSuccess(Format('Built %s (%s)', [Res.Compile.Spec.OutputBinaryPath, SummaryParts]));
+  if not AOpts.Quiet then
+    WriteSuccess(Format('Built %s (%s)', [Res.Compile.Spec.OutputBinaryPath, SummaryParts]));
+  ABinaryPath := Res.Compile.Spec.OutputBinaryPath;
+  AIsProgram := Res.Manifest.Kind = mkProgram;
   Result := 0;
+end;
+
+function ExecuteBuildCommand(const AArgs: array of string): Integer;
+var
+  I: Integer;
+  Arg, Val: string;
+  Opts: TBuildPipelineOptions;
+  BinPath: string;
+  IsProg: Boolean;
+begin
+  Opts := Default(TBuildPipelineOptions);
+  I := 0;
+  while I <= High(AArgs) do
+  begin
+    Arg := AArgs[I];
+    if (Arg = '-h') or (Arg = '--help') or (Arg = 'help') then
+    begin
+      PrintBuildHelp;
+      Exit(0);
+    end
+    else if (Arg = '-p') or (Arg = '--profile') then
+      Opts.ProfileName := NextOptValue(AArgs, I, Arg)
+    else if SplitOptEq(Arg, '--profile', Val) then
+      Opts.ProfileName := Val
+    else if (Arg = '-m') or (Arg = '--manifest') then
+      Opts.Target.ManifestOverride := NextOptValue(AArgs, I, Arg)
+    else if SplitOptEq(Arg, '--manifest', Val) then
+      Opts.Target.ManifestOverride := Val
+    else if Arg = '--clean' then
+      Opts.Clean := True
+    else if Arg = '--locked' then
+      Opts.Target.Locked := True
+    else if Arg = '--offline' then
+      Opts.Target.Offline := True
+    else if (Arg = '-v') or (Arg = '--verbose') then
+      Opts.Verbose := True
+    else if (Arg = '-q') or (Arg = '--quiet') then
+      Opts.Quiet := True
+    else if Arg = '--json' then
+      Opts.Json := True
+    else if (Arg = '--release') or (Arg = '-r') then
+      raise ENikError.CreateFmt('Unknown option ''%s'' for ''nik build''. Use ''-p release'' or ''--profile release''.', [Arg])
+    else if (Arg <> '') and (Arg[1] = '-') then
+      raise ENikError.CreateFmt('Unknown option ''%s'' for ''nik build''. Run ''nik build --help''.', [Arg])
+    else if Opts.Source = '' then
+      Opts.Source := Arg
+    else
+      raise ENikError.CreateFmt('Unexpected argument ''%s'' for ''nik build'' (only one SOURCE is allowed).', [Arg]);
+    Inc(I);
+  end;
+  Result := RunBuildPipeline(Opts, BinPath, IsProg);
 end;
 
 end.
