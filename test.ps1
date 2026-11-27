@@ -976,7 +976,6 @@ package:
     mode: objfpc
     unitPaths: [src]
   test:
-    entry: tests/pkg_test.pas
     dependencies:
       mock-assert: https://github.com/example/mock-assert@^0.1.0
 "@ | Set-Content -Path (Join-Path $DepDir 'nik.yaml') -Encoding UTF8
@@ -1077,7 +1076,6 @@ program:
       path: ../ext-greeting
 
   test:
-    entry: tests/test_all.pas
     build:
       unitPaths: [tests]
       defines: [TESTING]
