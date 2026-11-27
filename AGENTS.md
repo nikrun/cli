@@ -40,7 +40,7 @@ Before designing new CLI subcommands, flags, manifests, documentation, or archit
 
 ## Build & Verification Commands
 
-Run commands from the repository root (`pwsh` / Windows PowerShell):
+Run commands from the repository root (`pwsh` / Windows PowerShell). `build.ps1` compiles the CLI with `nik build`, so a released `nik` must be installed first (found via `-NikPath`, `PATH` or `~/.nikrun/bin`); `nik` installs the Free Pascal SDK pinned in `nik.yaml` itself. A plain `nik build` needs the version include that `build.ps1` generates (`.work/generated/nik_build_version.inc`), so use `build.ps1` for local builds.
 
 ```powershell
 # Full build, test & package pipeline (outputs ZIP, release-notes.json & manifest.json to .out/)
@@ -60,7 +60,6 @@ Run commands from the repository root (`pwsh` / Windows PowerShell):
 # Run the automated CLI & LSP end-to-end test suite directly
 .\test.ps1
 
-# CI flow: provision newest Nikrun FPC SDK from nikrun/sdk, then build, test & package release artifacts
-.\prepare.ps1
+# CI flow (after nikrun/github-setup-nik installed the bootstrap nik): build, test & package release artifacts
 .\build.ps1 -OutDir artifacts -Version "v0.1.0-build.1-channel.insider" -Profile release -Clean -RunTests
 ```

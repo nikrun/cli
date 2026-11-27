@@ -171,6 +171,7 @@ cli/
 │   └── test.ps1
 ├── src/
 │   ├── nik.pas                  # CLI entry point & global argument dispatcher
+│   ├── nik.rc                   # Windows resource script (embeds brand/ico/nikrun.ico into nik.exe)
 │   ├── nik.types.pas            # Domain records, constants & ENikError exception type
 │   ├── nik.term.pas             # Cross-platform ANSI styling, tables & progress output
 │   ├── nik.platform.pas         # Host OS/CPU architecture detection & startup hardening
@@ -207,8 +208,7 @@ cli/
 │   └── lazarus/                 # Shallow Lazarus submodule providing CodeTools & LazUtils
 ├── version.txt                  # Single source of truth SemVer (e.g. 0.1.0)
 ├── changelog.yml                # Structured Keep-a-Changelog release history
-├── prepare.ps1                  # Provisions & verifies newest prebuilt Nikrun FPC SDK from nikrun/sdk
-├── build.ps1                    # Compiles, tests & packages nik-<versionTag>-<triplet>.zip + manifest.json
+├── build.ps1                    # Compiles (with a released nik), tests & packages nik-<versionTag>-<triplet>.zip + manifest.json
 ├── nik.yaml                     # Manifest of the `nik` CLI itself (`nik build`, `nik test`, `nik lsp` in VS Code)
 └── test.ps1                     # End-to-end integration test suite
 ```
@@ -218,9 +218,9 @@ cli/
 ## Development & Testing
 
 ```powershell
-# 1. Initialize submodules & provision newest prebuilt Nikrun Free Pascal SDK into ~/.nikrun (first-time setup)
+# 1. Initialize submodules (first-time setup). A released `nik` must be installed (https://nikrun.dev);
+#    it installs the Free Pascal SDK pinned in nik.yaml into ~/.nikrun on demand.
 git submodule update --init --recursive --depth 1
-.\prepare.ps1
 
 # 2. Full build, test & package pipeline (outputs ZIP, release-notes.json & manifest.json to .out/)
 .\build.ps1

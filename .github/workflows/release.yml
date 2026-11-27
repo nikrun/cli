@@ -124,8 +124,6 @@ jobs:
           clean-version: ${{ needs.check-activity.outputs.clean_version }}
           version-tag: ${{ needs.check-activity.outputs.version_tag }}
           channel: ${{ needs.check-activity.outputs.channel }}
-          target-os: ${{ matrix.target_os }}
-          target-cpu: ${{ matrix.target_cpu }}
           github-token: ${{ secrets.NIKRUN_PAT || github.token }}
 
   release:

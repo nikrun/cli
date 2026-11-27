@@ -390,6 +390,13 @@ try {
     $expectedCleanVer = [regex]::Escape(((Get-Content -Path (Join-Path $CliRoot 'version.txt') -Raw).Trim() -replace '^v', ''))
     $ver = Invoke-Nik -NikHome $TestHome -Arguments @('--version')
     Assert-True ($ver.Output -match "^nik v?$expectedCleanVer\b") 'nik --version prints CLI version'
+    if ($IsWin) {
+        if (-not ('NikTest.IconProbe' -as [type])) {
+            Add-Type -Namespace NikTest -Name IconProbe -MemberDefinition '[System.Runtime.InteropServices.DllImport("shell32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)] public static extern uint ExtractIconEx(string file, int index, System.IntPtr[] large, System.IntPtr[] small, uint count);'
+        }
+        $embeddedIcons = [NikTest.IconProbe]::ExtractIconEx($NikExe, -1, $null, $null, 0)
+        Assert-True ($embeddedIcons -ge 1) 'nik.exe embeds the Nikrun icon resource (src/nik.rc)'
+    }
 
     $help = Invoke-Nik -NikHome $TestHome -Arguments @('--help')
     Assert-True ($help.Output -match 'COMMANDS:' -and $help.Output -match 'init' -and $help.Output -match 'sdk') 'nik --help lists init and sdk commands'

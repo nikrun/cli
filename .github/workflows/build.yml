@@ -47,6 +47,4 @@ jobs:
       - name: Run Build and Test Action
         uses: ./.github/actions/build
         with:
-          target-os: ${{ matrix.target_os }}
-          target-cpu: ${{ matrix.target_cpu }}
           github-token: ${{ secrets.NIKRUN_PAT || github.token }}

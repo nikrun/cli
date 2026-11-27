@@ -21,6 +21,12 @@ program:
     includePaths:
       - vendor/lazarus/components/lazutils
       - vendor/lazarus/components/codetools
+      - .work/generated
+    defines:
+      - NIK_HAS_BUILD_VERSION
+    # -FF: compile res/nik.rc with fpcres (the default windres fails on the aarch64-win64 SDK)
+    fpcArgs:
+      - -FF
 
   dependencies:
     nikrun-lsp-protocol: ./lsp-protocol

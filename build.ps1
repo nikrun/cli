@@ -1,11 +1,13 @@
 ﻿<#
 .SYNOPSIS
-    Builds, tests, and packages the nik CLI using a portable Nikrun Free Pascal SDK.
+    Builds, tests, and packages the nik CLI with an already installed (bootstrap) nik.
 
 .DESCRIPTION
     Unified build script aligned with the Nikrun/Niksphere CI & Release pipeline:
     - Resolves CleanVersion and VersionTag from version.txt (or -Version).
-    - Compiles bin/nik(.exe) with build-time version injection (without modifying tracked sources).
+    - Compiles bin/nik(.exe) with `nik build` (bootstrap nik from -NikPath, PATH or ~/.nikrun/bin; the Free Pascal
+      SDK comes from nik.yaml and is installed by nik on demand) with build-time version injection through the
+      generated include .work/generated/nik_build_version.inc (without modifying tracked sources).
     - Runs build-lib Pester tests, nikrun-lsp-protocol unit tests, and nik CLI E2E tests when -RunTests is active.
     - Packages nik-<VersionTag>-<targetTriplet>.zip (+ .sha256), release-notes.json, and manifest.json into -OutDir.
     - Supports -ManifestOnly to assemble a unified multi-platform manifest.json from prebuilt CI matrix artifacts.
@@ -14,6 +16,7 @@
     .\build.ps1
     .\build.ps1 -RunTests:$false
     .\build.ps1 -Profile release -Install -RunTests:$false
+    .\build.ps1 -NikPath C:\tools\nik\nik.exe -RunTests:$false
     .\build.ps1 -OutDir artifacts -Version "v0.1.0-build.42-channel.insider" -RunTests
     .\build.ps1 -OutDir artifacts -Version "v0.1.0-build.42-channel.stable" -ManifestOnly
 #>
@@ -26,7 +29,7 @@ param (
     [switch]$RunTests = $true,
     [switch]$GenerateSpecs = $true,
     [switch]$ManifestOnly,
-    [string]$SdkPath = "",
+    [string]$NikPath = "",
     [string]$NikrunHome = "",
     [switch]$Install,
     [switch]$Clean
@@ -68,13 +71,11 @@ if ($ManifestOnly) {
 $BuiltExe = ""
 
 if (-not $ManifestOnly) {
-    $SrcDir            = [System.IO.Path]::Combine($RootDir, 'src')
     $BrandIcoPath      = [System.IO.Path]::Combine($RootDir, 'brand', 'ico', 'nikrun.ico')
     $LspProtocolSrcDir = [System.IO.Path]::Combine($RootDir, 'lsp-protocol', 'src')
-    $LazUtilsDir       = [System.IO.Path]::Combine($RootDir, 'vendor', 'lazarus', 'components', 'lazutils')
     $CodeToolsDir      = [System.IO.Path]::Combine($RootDir, 'vendor', 'lazarus', 'components', 'codetools')
     $BinOutDir         = [System.IO.Path]::Combine($RootDir, 'bin')
-    $EntryPas          = [System.IO.Path]::Combine($SrcDir, 'nik.pas')
+    $GeneratedDir      = [System.IO.Path]::Combine($RootDir, '.work', 'generated')
 
     if (-not (Test-Path $LspProtocolSrcDir)) {
         throw "nikrun-lsp-protocol source directory not found at: $LspProtocolSrcDir"
@@ -87,6 +88,11 @@ if (-not $ManifestOnly) {
         [bool]$IsWindows
     } else {
         ($env:OS -match 'Windows')
+    }
+
+    # src/nik.rc embeds brand/ico/nikrun.ico into Windows builds.
+    if ($IsWinHost -and -not (Test-Path $BrandIcoPath)) {
+        throw "Nikrun brand icon not found at: $BrandIcoPath (run 'git submodule update --init --depth 1')."
     }
 
     $HomeDir = if ($IsWinHost -and $env:USERPROFILE) {
@@ -105,75 +111,28 @@ if (-not $ManifestOnly) {
         [System.IO.Path]::Combine($HomeDir, '.nikrun')
     }
 
-    function Resolve-FpcToolchain {
-        param([string]$ExplicitSdkPath)
+    function Resolve-BootstrapNik {
+        param([string]$ExplicitPath)
 
-        $candidates = @()
-        if (-not [string]::IsNullOrWhiteSpace($ExplicitSdkPath)) {
-            $resolvedExplicit = Resolve-FullPsPath $ExplicitSdkPath
+        if (-not [string]::IsNullOrWhiteSpace($ExplicitPath)) {
+            $resolvedExplicit = Resolve-FullPsPath $ExplicitPath
             if (-not (Test-Path $resolvedExplicit)) {
-                throw "Specified -SdkPath does not exist: $resolvedExplicit"
+                throw "Specified -NikPath does not exist: $resolvedExplicit"
             }
-            $candidates += $resolvedExplicit
-        } else {
-            $sdksDir = [System.IO.Path]::Combine($EffectiveNikHome, 'sdks')
-            if (Test-Path $sdksDir) {
-                foreach ($d in (Get-ChildItem -Path $sdksDir -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending)) {
-                    $candidates += $d.FullName
-                }
-            }
-
-            foreach ($stageRoot in @(
-                [System.IO.Path]::Combine($RootDir, '.work', 'stage'),
-                [System.IO.Path]::Combine((Split-Path -Parent $RootDir), 'sdk', '.work', 'stage')
-            )) {
-                if (Test-Path $stageRoot) {
-                    foreach ($d in (Get-ChildItem -Path $stageRoot -Directory -Filter 'nikrun-fpc-sdk-*' -ErrorAction SilentlyContinue | Sort-Object Name -Descending)) {
-                        $candidates += $d.FullName
-                    }
-                }
-            }
+            return $resolvedExplicit
         }
 
-        foreach ($cand in $candidates) {
-            $manifestPath = [System.IO.Path]::Combine($cand, 'sdk-manifest.json')
-            if (Test-Path $manifestPath) {
-                $manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json
-                $binDir   = [System.IO.Path]::Combine($cand, ($manifest.paths.binDir -replace '[/\\]', [System.IO.Path]::DirectorySeparatorChar))
-                $ppcProp  = $manifest.paths.PSObject.Properties['ppcBinary']
-                $ppcBin   = if ($null -ne $ppcProp -and -not [string]::IsNullOrWhiteSpace([string]$ppcProp.Value)) {
-                    [System.IO.Path]::Combine($cand, ([string]$ppcProp.Value -replace '[/\\]', [System.IO.Path]::DirectorySeparatorChar))
-                } else {
-                    ''
-                }
-                $fpcCfg = [System.IO.Path]::Combine($binDir, 'fpc.cfg')
-
-                $gitRefProp    = $manifest.PSObject.Properties['gitRef']
-                $gitCommitProp = $manifest.PSObject.Properties['gitCommit']
-
-                if ((-not [string]::IsNullOrWhiteSpace($ppcBin)) -and (Test-Path $ppcBin) -and (Test-Path $fpcCfg)) {
-                    return [PSCustomObject]@{
-                        SdkId         = [string]$manifest.sdkId
-                        SdkRoot       = $cand
-                        FpcVersion    = [string]$manifest.fpcVersion
-                        GitRef        = if ($null -ne $gitRefProp)    { [string]$gitRefProp.Value }    else { '' }
-                        GitCommit     = if ($null -ne $gitCommitProp) { [string]$gitCommitProp.Value } else { '' }
-                        TargetOs      = [string]$manifest.targetOs
-                        TargetCpu     = [string]$manifest.targetCpu
-                        TargetTriplet = [string]$manifest.targetTriplet
-                        BinDir        = $binDir
-                        CompilerBin   = $ppcBin
-                        FpcCfg        = $fpcCfg
-                    }
-                }
-            }
+        $onPath = Get-Command nik -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($null -ne $onPath) {
+            return $onPath.Source
         }
 
-        if (-not [string]::IsNullOrWhiteSpace($ExplicitSdkPath)) {
-            throw "Invalid or unconfigured Nikrun Free Pascal SDK at '$ExplicitSdkPath' (expected sdk-manifest.json, ppc* binary, and fpc.cfg)."
+        $homeNik = [System.IO.Path]::Combine($EffectiveNikHome, 'bin', $(if ($IsWinHost) { 'nik.exe' } else { 'nik' }))
+        if (Test-Path $homeNik) {
+            return $homeNik
         }
 
-        throw "No portable Nikrun Free Pascal SDK found in '$EffectiveNikHome'. Run .\prepare.ps1 first."
+        throw "No bootstrap nik found (checked -NikPath, PATH and '$homeNik'). Install a released nik first (see https://nikrun.dev, or use the nikrun/github-setup-nik action in CI)."
     }
 
     if ($RunTests) {
@@ -181,165 +140,87 @@ if (-not $ManifestOnly) {
         Invoke-BuildLibTests -RootDir $RootDir
     }
 
-    $Toolchain = Resolve-FpcToolchain -ExplicitSdkPath $SdkPath
-    $CacheDir  = [System.IO.Path]::Combine($RootDir, '.cache', "$($Toolchain.TargetTriplet)-$Profile")
-    $ExeExt    = if ($Toolchain.TargetOs -eq 'win64') { '.exe' } else { '' }
-    $OutExeName = "nik$ExeExt"
+    $ExeExt     = if ($IsWinHost) { '.exe' } else { '' }
+    $OutExePath = [System.IO.Path]::Combine($BinOutDir, "nik$ExeExt")
+    New-Item -ItemType Directory -Force -Path $BinOutDir, $GeneratedDir | Out-Null
 
-    if ($Clean -and (Test-Path $CacheDir)) {
-        Remove-Item -Recurse -Force $CacheDir
-    }
-    New-Item -ItemType Directory -Force -Path $BinOutDir, $CacheDir | Out-Null
-
-    # Write build-time version include into isolated CacheDir (only rewrite if changed to preserve incremental .ppu timestamps)
+    # Write the build-time version include (picked up through nik.yaml build.includePaths + NIK_HAS_BUILD_VERSION).
+    # Only rewritten when changed so FPC's include-file tracking keeps incremental .ppu files valid.
     $EscapedVersionTag = $VersionTag.Replace("'", "''")
-    $VersionIncPath    = [System.IO.Path]::Combine($CacheDir, 'nik_build_version.inc')
+    $VersionIncPath    = [System.IO.Path]::Combine($GeneratedDir, 'nik_build_version.inc')
     $VersionIncContent = "NIK_VERSION = '$EscapedVersionTag';`n"
     $ExistingInc       = if (Test-Path $VersionIncPath) { [System.IO.File]::ReadAllText($VersionIncPath) } else { '' }
     if ($ExistingInc -cne $VersionIncContent) {
         [System.IO.File]::WriteAllText($VersionIncPath, $VersionIncContent, [System.Text.UTF8Encoding]::new($false))
     }
 
-    $DefineFlag = if ($Profile -eq 'release') { '-dRELEASE' } else { '-dDEBUG' }
-
-    function Update-Win32IconResource([string]$IcoPath, [string]$ResPath) {
-        [byte[]]$IcoBytes = [System.IO.File]::ReadAllBytes($IcoPath)
-        if ($IcoBytes.Length -lt 6) {
-            throw "Invalid .ico file (too short): $IcoPath"
-        }
-        $reserved = [System.BitConverter]::ToUInt16($IcoBytes, 0)
-        $icoType  = [System.BitConverter]::ToUInt16($IcoBytes, 2)
-        $count    = [System.BitConverter]::ToUInt16($IcoBytes, 4)
-        if ($reserved -ne 0 -or $icoType -ne 1 -or $count -lt 1) {
-            throw "Invalid .ico header: $IcoPath"
-        }
-
-        function Write-DwordPad([System.IO.BinaryWriter]$W) {
-            $rem = [int]($W.BaseStream.Position % 4)
-            if ($rem -ne 0) {
-                for ($p = 0; $p -lt (4 - $rem); $p++) { $W.Write([byte]0) }
-            }
-        }
-        function Write-ResHdr([System.IO.BinaryWriter]$W, [uint32]$DataLen, [uint16]$TypeId, [uint16]$NameId, [uint16]$Flags, [uint16]$Lang) {
-            $W.Write([uint32]$DataLen)
-            $W.Write([uint32]32)
-            $W.Write([uint16]0xFFFF); $W.Write([uint16]$TypeId)
-            $W.Write([uint16]0xFFFF); $W.Write([uint16]$NameId)
-            $W.Write([uint32]0)
-            $W.Write([uint16]$Flags); $W.Write([uint16]$Lang)
-            $W.Write([uint32]0); $W.Write([uint32]0)
-        }
-
-        $resMs = [System.IO.MemoryStream]::new()
-        $rw    = [System.IO.BinaryWriter]::new($resMs)
-        $grpMs = [System.IO.MemoryStream]::new()
-        $gw    = [System.IO.BinaryWriter]::new($grpMs)
-
-        Write-ResHdr $rw 0 0 0 0 0
-
-        $gw.Write([uint16]0)
-        $gw.Write([uint16]1)
-        $gw.Write([uint16]$count)
-
-        for ($i = 0; $i -lt $count; $i++) {
-            $entryOff  = 6 + ($i * 16)
-            $imgSize   = [System.BitConverter]::ToUInt32($IcoBytes, $entryOff + 8)
-            $imgOffset = [System.BitConverter]::ToUInt32($IcoBytes, $entryOff + 12)
-            $iconId    = [uint16]($i + 1)
-
-            Write-ResHdr $rw $imgSize 3 $iconId 0x1010 0x0409
-            $rw.Write($IcoBytes, [int]$imgOffset, [int]$imgSize)
-            Write-DwordPad $rw
-
-            $gw.Write($IcoBytes, $entryOff, 12)
-            $gw.Write($iconId)
-        }
-
-        $gw.Flush()
-        [byte[]]$grpBytes = $grpMs.ToArray()
-        $gw.Dispose(); $grpMs.Dispose()
-
-        Write-ResHdr $rw ([uint32]$grpBytes.Length) 14 1 0x1030 0x0409
-        $rw.Write($grpBytes)
-        Write-DwordPad $rw
-        $rw.Flush()
-
-        [byte[]]$NewResBytes = $resMs.ToArray()
-        $rw.Dispose(); $resMs.Dispose()
-
-        $WriteRes = $true
-        if (Test-Path $ResPath) {
-            [byte[]]$OldResBytes = [System.IO.File]::ReadAllBytes($ResPath)
-            if ($OldResBytes.Length -eq $NewResBytes.Length) {
-                $WriteRes = $false
-                for ($bIdx = 0; $bIdx -lt $NewResBytes.Length; $bIdx++) {
-                    if ($OldResBytes[$bIdx] -ne $NewResBytes[$bIdx]) {
-                        $WriteRes = $true
-                        break
-                    }
-                }
-            }
-        }
-        if ($WriteRes) {
-            [System.IO.File]::WriteAllBytes($ResPath, $NewResBytes)
-        }
+    $BootstrapNik = Resolve-BootstrapNik -ExplicitPath $NikPath
+    if ([string]::Equals([System.IO.Path]::GetFullPath($BootstrapNik), [System.IO.Path]::GetFullPath($OutExePath), [System.StringComparison]::OrdinalIgnoreCase)) {
+        # The bootstrap nik is the file about to be overwritten: use a private copy instead.
+        $BootstrapDir = [System.IO.Path]::Combine($RootDir, '.work', 'bootstrap')
+        New-Item -ItemType Directory -Force -Path $BootstrapDir | Out-Null
+        $BootstrapCopy = [System.IO.Path]::Combine($BootstrapDir, "nik$ExeExt")
+        Copy-Item -Path $BootstrapNik -Destination $BootstrapCopy -Force
+        $BootstrapNik = $BootstrapCopy
     }
 
-    $WinResArgs = @()
-    if ($Toolchain.TargetOs -eq 'win64') {
-        if (-not (Test-Path $BrandIcoPath)) {
-            throw "Nikrun brand icon not found at: $BrandIcoPath (run 'git submodule update --init --depth 1')."
-        }
-        $ResSrcDir      = [System.IO.Path]::Combine($CacheDir, 'res-src')
-        New-Item -ItemType Directory -Force -Path $ResSrcDir | Out-Null
-        $IconResPath    = [System.IO.Path]::Combine($ResSrcDir, 'nik_build_icon.res')
-        Update-Win32IconResource -IcoPath $BrandIcoPath -ResPath $IconResPath
-        $RelResPath     = "../.cache/$($Toolchain.TargetTriplet)-$Profile/res-src/nik_build_icon.res"
-        $IconIncPath    = [System.IO.Path]::Combine($CacheDir, 'nik_build_icon.inc')
-        $IconIncContent = '{$R ''' + $RelResPath + '''}' + "`n"
-        $ExistingIconInc = if (Test-Path $IconIncPath) { [System.IO.File]::ReadAllText($IconIncPath) } else { '' }
-        if ($ExistingIconInc -cne $IconIncContent) {
-            [System.IO.File]::WriteAllText($IconIncPath, $IconIncContent, [System.Text.UTF8Encoding]::new($false))
-        }
-        $WinResArgs = @('-dNIK_HAS_WIN_RES')
+    Write-Host "  -> Compiling nik with bootstrap $BootstrapNik ..."
+    $nikBuildArgs = @('--no-color', '--nikrun-home', $EffectiveNikHome, 'build', '-p', $Profile, '--json')
+    if ($Clean) {
+        $nikBuildArgs += '--clean'
     }
 
-    Write-Host "  -> Compiling nik ($($Toolchain.TargetTriplet), SDK $($Toolchain.SdkId))..."
-    $fpcArgs = @(
-        '-n',
-        "@$($Toolchain.FpcCfg)",
-        $DefineFlag,
-        '-dNIK_HAS_BUILD_VERSION'
-    ) + $WinResArgs + @(
-        "-Fi$CacheDir",
-        "-Fu$LazUtilsDir",
-        "-Fi$LazUtilsDir",
-        "-Fu$CodeToolsDir",
-        "-Fi$CodeToolsDir",
-        "-Fu$LspProtocolSrcDir",
-        "-Fu$SrcDir",
-        "-FE$BinOutDir",
-        "-FU$CacheDir",
-        "-o$OutExeName",
-        $EntryPas
-    )
-
-    $PrevPath = $env:PATH
+    $prevErr = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    Push-Location $RootDir
     try {
-        if (-not [string]::IsNullOrWhiteSpace($Toolchain.BinDir) -and (Test-Path $Toolchain.BinDir)) {
-            $env:PATH = "$($Toolchain.BinDir)$([System.IO.Path]::PathSeparator)$PrevPath"
-        }
-        & $Toolchain.CompilerBin @fpcArgs | Out-Host
+        $buildAll    = & $BootstrapNik @nikBuildArgs 2>&1
         $CompileExit = $LASTEXITCODE
     } finally {
-        $env:PATH = $PrevPath
+        Pop-Location
+        $ErrorActionPreference = $prevErr
+    }
+    $buildStdout = @($buildAll | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] })
+    $buildStderr = @($buildAll | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] })
+    $jsonText    = (($buildStdout | ForEach-Object { "$_" }) -join "`n").Trim()
+    $stderrText  = (($buildStderr | ForEach-Object { "$_" }) -join "`n").Trim()
+
+    $Report = $null
+    try { $Report = $jsonText | ConvertFrom-Json } catch { $Report = $null }
+    if ($null -eq $Report) {
+        throw "'nik build' returned no JSON report (exit $CompileExit):`n$jsonText`n$stderrText"
     }
 
-    if ($CompileExit -ne 0) {
+    $BuildOk = ($null -ne $Report.PSObject.Properties['success']) -and [bool]$Report.success
+    if ($CompileExit -ne 0 -or -not $BuildOk) {
+        if ($null -ne $Report.PSObject.Properties['error']) {
+            Write-Host "  error: $($Report.error)" -ForegroundColor Red
+        }
+        foreach ($diag in @($Report.diagnostics)) {
+            if ($diag.severity -in @('error', 'fatal')) {
+                Write-Host "  $($diag.file)($($diag.line),$($diag.column)) $($diag.severity) [$($diag.code)]: $($diag.message)" -ForegroundColor Red
+            }
+        }
         throw "nik CLI compilation failed with exit code $CompileExit"
     }
 
-    $BuiltExe = [System.IO.Path]::Combine($BinOutDir, $OutExeName)
+    $SdkCommit = ''
+    $SdkManifestPath = Join-Path ([string]$Report.toolchain.installPath) 'sdk-manifest.json'
+    if (Test-Path $SdkManifestPath) {
+        $sdkManifest = Get-Content $SdkManifestPath -Raw | ConvertFrom-Json
+        if ($null -ne $sdkManifest.PSObject.Properties['gitCommit']) {
+            $SdkCommit = [string]$sdkManifest.gitCommit
+        }
+    }
+    $Toolchain = [PSCustomObject]@{
+        SdkId         = [string]$Report.toolchain.sdkId
+        FpcVersion    = [string]$Report.toolchain.fpcVersion
+        TargetTriplet = [string]$Report.toolchain.targetTriplet
+        GitCommit     = $SdkCommit
+    }
+    Write-Host "  -> nik build ($($Toolchain.TargetTriplet), SDK $($Toolchain.SdkId)): $($Report.counts.warnings) warning(s), $($Report.durationMs) ms"
+
+    $BuiltExe = [string]$Report.output.binaryPath
     if (-not (Test-Path $BuiltExe)) {
         throw "Expected CLI binary was not produced at: $BuiltExe"
     }

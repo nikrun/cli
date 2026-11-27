@@ -1,5 +1,5 @@
 name: Build and Test Nikrun CLI
-description: Encapsulates SDK preparation, native Free Pascal compilation, testing, and ZIP packaging for the nik CLI
+description: Encapsulates bootstrap nik setup, native Free Pascal compilation via nik build, testing, and ZIP packaging for the nik CLI
 
 inputs:
   clean-version:
@@ -14,18 +14,6 @@ inputs:
     description: 'Release channel used when calculating version tag (dev, insider, stable)'
     required: false
     default: 'dev'
-  target-os:
-    description: 'Target OS (auto, win64, linux, darwin)'
-    required: false
-    default: 'auto'
-  target-cpu:
-    description: 'Target CPU (auto, x86_64, aarch64)'
-    required: false
-    default: 'auto'
-  sdk-version:
-    description: 'Prebuilt Nikrun FPC SDK version from nikrun/sdk latest release (e.g. latest, 3.3.1, 3.2.4)'
-    required: false
-    default: 'latest'
   run-tests:
     description: 'Run build-lib, lsp-protocol, and CLI integration tests'
     required: false
@@ -56,15 +44,13 @@ runs:
         Set-Location "${{ inputs.working-directory }}"
         git submodule update --init --recursive --depth 1
 
-    - name: Resolve Version & Target Context
+    - name: Resolve Version
       id: context
       shell: pwsh
       env:
         INPUT_CLEAN_VERSION: ${{ inputs.clean-version }}
         INPUT_VERSION_TAG: ${{ inputs.version-tag }}
         INPUT_CHANNEL: ${{ inputs.channel }}
-        INPUT_TARGET_OS: ${{ inputs.target-os }}
-        INPUT_TARGET_CPU: ${{ inputs.target-cpu }}
       run: |
         Set-Location "${{ inputs.working-directory }}"
 
@@ -86,21 +72,12 @@ runs:
 
         [System.IO.File]::AppendAllText($env:GITHUB_OUTPUT, "clean_version=$cleanVer`nversion_tag=$verTag`n", [System.Text.UTF8Encoding]::new($false))
 
-    - name: Prepare Latest Nikrun FPC SDK
-      shell: pwsh
-      env:
-        GH_TOKEN: ${{ inputs.github-token || github.token }}
-        INPUT_TARGET_OS: ${{ inputs.target-os }}
-        INPUT_TARGET_CPU: ${{ inputs.target-cpu }}
-        INPUT_SDK_VERSION: ${{ inputs.sdk-version }}
-      run: |
-        Set-Location "${{ inputs.working-directory }}"
-        $params = @{
-          TargetOs   = if ([string]::IsNullOrWhiteSpace($env:INPUT_TARGET_OS)) { 'auto' } else { $env:INPUT_TARGET_OS }
-          TargetCpu  = if ([string]::IsNullOrWhiteSpace($env:INPUT_TARGET_CPU)) { 'auto' } else { $env:INPUT_TARGET_CPU }
-          SdkVersion = if ([string]::IsNullOrWhiteSpace($env:INPUT_SDK_VERSION)) { 'latest' } else { $env:INPUT_SDK_VERSION }
-        }
-        ./prepare.ps1 @params | Out-Null
+    # build.ps1 compiles the CLI with the released nik; nik installs the Free Pascal SDK pinned in nik.yaml on demand.
+    - name: Install Bootstrap nik
+      uses: nikrun/github-setup-nik@v1
+      with:
+        channel: stable
+        github-token: ${{ inputs.github-token || github.token }}
 
     - name: Build and Test Artifacts
       id: build
