@@ -1534,6 +1534,13 @@ end.
                 }
             }
 
+            # Read the CPU time while the process is still alive (reading it after exit fails on Linux and macOS)
+
+            $cpuSeconds = -1.0
+
+            try { $cpuSeconds = $proc.TotalProcessorTime.TotalSeconds } catch { }
+
+
             $proc.StandardInput.BaseStream.Flush()
             $proc.StandardInput.Close()
 
@@ -1549,9 +1556,6 @@ end.
             }
             $stderrTask.Wait(5000) | Out-Null
             $stderrText = $stderrTask.Result
-
-            $cpuSeconds = -1.0
-            try { $cpuSeconds = $proc.TotalProcessorTime.TotalSeconds } catch { }
 
             return [PSCustomObject]@{
                 Exited     = $exited
