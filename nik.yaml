@@ -24,7 +24,3 @@ program:
 
   dependencies:
     nikrun-lsp-protocol: ./lsp-protocol
-    vsoft-yaml:
-      path: ../../tino-teuber/VSoft.YAML-for-Freepascal
-      unitPaths:
-        - Source

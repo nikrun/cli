@@ -87,7 +87,7 @@ begin
     on E: ENikError do
     begin
       AssertTrue(E.Message, Pos('test.yaml:2', E.Message) > 0);
-      AssertTrue(E.Message, Pos('duplicated mapping key', E.Message) > 0);
+      AssertTrue(E.Message, Pos('Duplicate key', E.Message) > 0);
     end;
   end;
   Root.Free;
