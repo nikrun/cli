@@ -489,8 +489,8 @@ try {
     Assert-True ($localOneHuman -match '(?m)^1 SDK installed \(.+ total\)\r?$') 'nik sdk list uses singular SDK noun when 1 SDK matches'
 
     $remoteHuman = (Invoke-Nik -NikHome $TestHome -Arguments @('sdk', 'list', '--remote', '--index-url', $IndexUrl)).Output
-    Assert-True ($remoteHuman -match '(?m)^VERSION\s+TARGET\s+COMMIT\s+SIZE\s+INSTALLED\r?$' -and $remoteHuman -notmatch 'SDK ID') 'nik sdk list --remote displays clean VERSION TARGET COMMIT SIZE INSTALLED header'
-    Assert-True ($remoteHuman -match '(?m)^3\.2\.2\s+\S+\s+0d122c49\s+\S+\s+\S+\s+0d122c49\r?$' -and $remoteHuman -match '(?m)^9\.9\.9\s+\S+\s+deadbeef\s+\d+\.\d+\s+\S+\r?$') 'nik sdk list --remote shows installed commit in INSTALLED column and leaves uninstalled blank'
+    Assert-True ($remoteHuman -match '(?m)^VERSION\s+TARGET\s+COMMIT\s+INSTALLED\s+UPDATE\s+SIZE\r?$' -and $remoteHuman -notmatch 'SDK ID') 'nik sdk list --remote displays clean VERSION TARGET COMMIT INSTALLED UPDATE SIZE header'
+    Assert-True ($remoteHuman -match '(?m)^3\.2\.2\s+\S+\s+0d122c49\s+0d122c49\s+\S+\s+\S+\r?$' -and $remoteHuman -match '(?m)^9\.9\.9\s+\S+\s+deadbeef\s+\d+\.\d+\s+\S+\r?$') 'nik sdk list --remote shows installed commit in INSTALLED column and leaves uninstalled blank'
 
     # 7c. Outdated / legacy commit detection & nik sdk update lifecycle
     $UpdateHome = Join-Path $WorkDir 'nikrun-update-home'
@@ -516,7 +516,7 @@ try {
     Assert-True ($updLocalOut -match '(?m)^3\.2\.2\s+\S+\s+unknown\s+' -and $updLocalOut -match '(?m)^3\.3\.1\s+\S+\s+11112222\s+') 'nik sdk list shows unknown for legacy manifest without gitCommit and short SHA for commit-tracked SDK'
 
     $updRemOut = (Invoke-Nik -NikHome $UpdateHome -Arguments @('sdk', 'list', '--remote', '--index-url', $IndexUrl)).Output
-    Assert-True ($updRemOut -match '(?m)^3\.2\.2\s+.*\s+unknown \(update\)\r?$' -and $updRemOut -match '(?m)^3\.3\.1\s+.*\s+11112222 \(update\)\r?$') 'nik sdk list --remote flags both legacy unknown and older commit SDKs with (update)'
+    Assert-True ($updRemOut -match '(?m)^3\.2\.2\s+\S+\s+0d122c49\s+unknown\s+->\s+0d122c49\s' -and $updRemOut -match '(?m)^3\.3\.1\s+\S+\s+4774b8cd\s+11112222\s+->\s+4774b8cd\s') 'nik sdk list --remote flags both legacy unknown and older commit SDKs in the UPDATE column'
 
     $updRemJson = (Invoke-Nik -NikHome $UpdateHome -Arguments @('sdk', 'list', '--remote', '--index-url', $IndexUrl, '--json')).Output | ConvertFrom-Json
     $rem322Item = $updRemJson.sdks | Where-Object { $_.fpcVersion -eq '3.2.2' }
