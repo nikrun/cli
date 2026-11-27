@@ -482,9 +482,9 @@ try {
     Assert-True ($listTwo.sdks.Count -eq 2 -and $null -eq $listTwo.PSObject.Properties['defaultSdkId'] -and $null -eq $listTwo.sdks[0].PSObject.Properties['default']) 'nik sdk list --json lists both installed SDKs cleanly without default properties'
     Assert-True ($listTwo.sdks[0].sizeBytes -gt 0 -and $listTwo.sdks[1].sizeBytes -gt 0 -and $listTwo.totalSizeBytes -eq ($listTwo.sdks[0].sizeBytes + $listTwo.sdks[1].sizeBytes)) 'nik sdk list --json reports positive sizeBytes per SDK and accurate totalSizeBytes'
 
-    # 7b. Human table layout checks (VERSION TARGET COMMIT SIZE PATH, total summary & INSTALLED commit column)
+    # 7b. Human table layout checks (VERSION TARGET COMMIT UPDATE PATH SIZE, total summary & INSTALLED commit column)
     $localHuman = (Invoke-Nik -NikHome $TestHome -Arguments @('sdk', 'list')).Output
-    Assert-True ($localHuman -match '(?m)^VERSION\s+TARGET\s+COMMIT\s+SIZE\s+PATH\r?$' -and $localHuman -match '0d122c49' -and $localHuman -match '(?m)^2 SDKs installed \(.+ total\)\r?$' -and $localHuman -cnotmatch 'DEFAULT' -and $localHuman -cnotmatch 'SDK ID') 'nik sdk list displays VERSION TARGET COMMIT SIZE PATH header and total size summary without DEFAULT or SDK ID'
+    Assert-True ($localHuman -match '(?m)^VERSION\s+TARGET\s+COMMIT\s+UPDATE\s+PATH\s+SIZE\r?$' -and $localHuman -match '0d122c49' -and $localHuman -match '(?m)^2 SDKs installed \(.+ total\)\r?$' -and $localHuman -cnotmatch 'DEFAULT' -and $localHuman -cnotmatch 'SDK ID') 'nik sdk list displays VERSION TARGET COMMIT UPDATE PATH SIZE header and total size summary without DEFAULT or SDK ID'
     $localOneHuman = (Invoke-Nik -NikHome $TestHome -Arguments @('sdk', 'list', '--version', '3.2.2')).Output
     Assert-True ($localOneHuman -match '(?m)^1 SDK installed \(.+ total\)\r?$') 'nik sdk list uses singular SDK noun when 1 SDK matches'
 
