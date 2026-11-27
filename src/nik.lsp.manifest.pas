@@ -23,7 +23,8 @@ implementation
 
 uses
   nik.types, nik.platform, nik.paths, nik.fs, nik.archive,
-  nik.sdk.manager, nik.pkg.types, nik.pkg.lock, nik.pkg.fetch;
+  nik.sdk.manager, nik.pkg.types, nik.pkg.lock, nik.pkg.fetch,
+  VSoft.YAML;
 
 type
   TYamlCursorRole = (
@@ -138,161 +139,187 @@ begin
     Result := S;
 end;
 
-function ParseYamlLogicalLine(const ARawLine: string): TYamlLogicalLine;
 var
-  Len, I: Integer;
-  InSingle, InDouble: Boolean;
+  GLineParserOptions: IYAMLParserOptions;
+
+function LineParserOptions: IYAMLParserOptions;
+begin
+  if GLineParserOptions = nil then
+  begin
+    GLineParserOptions := TYAML.CreateParserOptions;
+    GLineParserOptions.RecordPositions := True;
+    GLineParserOptions.YAML11Compatibility := False;
+  end;
+  Result := GLineParserOptions;
+end;
+
+{ Parses one source line with VSoft.YAML. A line that is still being typed is usually not valid
+  on its own (an unclosed quote or bracket), so closing characters are appended until it parses;
+  they only extend the line, so every recorded position still refers to the original text. }
+function LoadYamlLine(const ARaw: string; ALeadingBytes: Integer; out ADoc: IYAMLDocument): Boolean;
+const
+  Suffixes: array[0..8] of UnicodeString = ('', '"', '''', ']', '}', '"]', ''']', '"}', '''}');
+var
+  Work: string;
+  I: Integer;
+begin
+  Result := False;
+  ADoc := nil;
+  Work := ARaw;
+  for I := 1 to ALeadingBytes do
+    if Work[I] = #9 then
+      Work[I] := ' ';
+  for I := Low(Suffixes) to High(Suffixes) do
+  begin
+    try
+      ADoc := TYAML.LoadFromString(UTF8Decode(Work) + Suffixes[I], LineParserOptions);
+      Exit(ADoc <> nil);
+    except
+      ADoc := nil;
+    end;
+  end;
+end;
+
+{ Reads the structure of one line (indentation, comment, "- " item, key, colon and value) from
+  the positions VSoft.YAML records while parsing it. All fields are 1-based UTF-8 byte indexes. }
+function ReadYamlLine(const ARaw: string): TYamlLogicalLine;
+var
+  Len, Lead, I, ContentEnd, StartByte, StopByte: Integer;
+  Doc: IYAMLDocument;
+  Root, Val: IYAMLValue;
+  Map: IYAMLMapping;
+  Seq: IYAMLSequence;
   DummyQuoted: Boolean;
+
+  function ByteOf(const APos: TYAMLPosition): Integer;
+  begin
+    Result := Utf16ColToByteIndex(ARaw, APos.Index);
+    if Result < 1 then
+      Result := 1;
+    if Result > Len + 1 then
+      Result := Len + 1;
+  end;
+
 begin
   Result := Default(TYamlLogicalLine);
-  Len := Length(ARawLine);
+  Len := Length(ARaw);
   if Len = 0 then
   begin
     Result.IsBlank := True;
     Exit;
   end;
 
-  // 1. Locate unquoted '#' comment (must be at start of line or preceded by whitespace)
-  InSingle := False;
-  InDouble := False;
-  I := 1;
-  while I <= Len do
-  begin
-    if InSingle then
-    begin
-      if ARawLine[I] = '''' then
-      begin
-        if (I + 1 <= Len) and (ARawLine[I + 1] = '''') then
-          Inc(I)
-        else
-          InSingle := False;
-      end;
-    end
-    else if InDouble then
-    begin
-      if (ARawLine[I] = '\') and (I + 1 <= Len) then
-        Inc(I)
-      else if ARawLine[I] = '"' then
-        InDouble := False;
-    end
-    else
-    begin
-      if ARawLine[I] = '''' then
-        InSingle := True
-      else if ARawLine[I] = '"' then
-        InDouble := True
-      else if (ARawLine[I] = '#') and ((I = 1) or IsSpaceOrTab(ARawLine[I - 1])) then
-      begin
-        Result.CommentStartByte := I;
-        Break;
-      end;
-    end;
-    Inc(I);
-  end;
+  Lead := 0;
+  while (Lead < Len) and IsSpaceOrTab(ARaw[Lead + 1]) do
+    Inc(Lead);
+  Result.EffectiveLen := Len;
+  Result.Indent := Lead;
+  Result.TrimRightEnd := Len;
 
-  if Result.CommentStartByte > 0 then
-    Result.EffectiveLen := Result.CommentStartByte - 1
-  else
-    Result.EffectiveLen := Len;
-
-  // 2. Measure leading indentation & trailing non-whitespace boundary
-  I := 1;
-  while (I <= Result.EffectiveLen) and IsSpaceOrTab(ARawLine[I]) do
-    Inc(I);
-  Result.Indent := I - 1;
-
-  Result.TrimRightEnd := Result.EffectiveLen;
-  while (Result.TrimRightEnd > Result.Indent) and IsSpaceOrTab(ARawLine[Result.TrimRightEnd]) do
-    Dec(Result.TrimRightEnd);
-
-  if Result.Indent >= Result.TrimRightEnd then
+  if Lead >= Len then
   begin
     Result.IsBlank := True;
+    Result.Indent := Len;
     Exit;
   end;
 
-  // 3. Check for block sequence item ('-' at EOL or followed by space/tab)
-  if (ARawLine[Result.Indent + 1] = '-') and
-     ((Result.Indent + 1 = Result.TrimRightEnd) or IsSpaceOrTab(ARawLine[Result.Indent + 2])) then
+  if ARaw[Lead + 1] = '#' then
   begin
+    Result.IsBlank := True;
+    Result.CommentStartByte := Lead + 1;
+    Result.EffectiveLen := Lead;
+    Result.TrimRightEnd := Lead;
+    Exit;
+  end;
+
+  Result.IsBlank := True;
+  if not LoadYamlLine(ARaw, Lead, Doc) then
+    Exit;
+  Root := Doc.Root;
+  if (Root = nil) or (not Root.HasRange) or Root.Range.IsEmpty then
+    Exit;
+
+  Result.IsBlank := False;
+  ContentEnd := Len + 1;
+
+  if Root.IsSequence and (ARaw[Lead + 1] = '-') then
+  begin
+    Seq := Root.AsSequence;
     Result.IsSeqItem := True;
-    Result.DashByte := Result.Indent + 1;
-    I := Result.DashByte + 1;
-    while (I <= Result.TrimRightEnd) and IsSpaceOrTab(ARawLine[I]) do
-      Inc(I);
-    if I <= Result.TrimRightEnd then
-      Result.SeqValStartByte := I
-    else
-      Result.SeqValStartByte := 0;
-    Exit;
-  end;
-
-  // 4. Locate first unquoted mapping colon (':' at TrimRightEnd or followed by space/tab)
-  InSingle := False;
-  InDouble := False;
-  I := Result.Indent + 1;
-  while I <= Result.TrimRightEnd do
-  begin
-    if InSingle then
+    Result.DashByte := Lead + 1;
+    ContentEnd := Result.DashByte + 1;
+    if Seq.Count > 0 then
     begin
-      if ARawLine[I] = '''' then
+      Val := Seq.Items[0];
+      if Val.HasRange and (not Val.Range.IsEmpty) then
       begin
-        if (I + 1 <= Result.TrimRightEnd) and (ARawLine[I + 1] = '''') then
-          Inc(I)
-        else
-          InSingle := False;
-      end;
-    end
-    else if InDouble then
-    begin
-      if (ARawLine[I] = '\') and (I + 1 <= Result.TrimRightEnd) then
-        Inc(I)
-      else if ARawLine[I] = '"' then
-        InDouble := False;
-    end
-    else
-    begin
-      if ARawLine[I] = '''' then
-        InSingle := True
-      else if ARawLine[I] = '"' then
-        InDouble := True
-      else if (ARawLine[I] = ':') and
-              ((I = Result.TrimRightEnd) or IsSpaceOrTab(ARawLine[I + 1])) then
-      begin
-        Result.HasColon := True;
-        Result.ColonByte := I;
-        Break;
+        Result.SeqValStartByte := ByteOf(Val.Range.Start);
+        ContentEnd := ByteOf(Val.Range.Stop);
       end;
     end;
-    Inc(I);
-  end;
-
-  if Result.HasColon then
+  end
+  else if Root.IsMapping and (ARaw[ByteOf(Root.Range.Start)] <> '{') and (Root.AsMapping.Count > 0) then
   begin
-    Result.KeyStartByte := Result.Indent + 1;
-    Result.KeyEndByte := Result.ColonByte - 1;
-    while (Result.KeyEndByte >= Result.KeyStartByte) and IsSpaceOrTab(ARawLine[Result.KeyEndByte]) do
-      Dec(Result.KeyEndByte);
-    if Result.KeyEndByte >= Result.KeyStartByte then
-      Result.KeyName := StripQuotes(Copy(ARawLine, Result.KeyStartByte, Result.KeyEndByte - Result.KeyStartByte + 1), DummyQuoted)
-    else
-      Result.KeyName := '';
-
-    I := Result.ColonByte + 1;
-    while (I <= Result.TrimRightEnd) and IsSpaceOrTab(ARawLine[I]) do
+    Map := Root.AsMapping;
+    Result.KeyName := UTF8Encode(Map.Keys[0]);
+    Result.KeyStartByte := ByteOf(Map.GetKeyRange(0).Start);
+    Result.KeyEndByte := ByteOf(Map.GetKeyRange(0).Stop) - 1;
+    ContentEnd := Result.KeyEndByte + 1;
+    I := ContentEnd;
+    while (I <= Len) and IsSpaceOrTab(ARaw[I]) do
       Inc(I);
-    if I <= Result.TrimRightEnd then
+    if (I <= Len) and (ARaw[I] = ':') then
     begin
-      Result.ValStartByte := I;
-      Result.ValEndByte := Result.TrimRightEnd;
+      Result.HasColon := True;
+      Result.ColonByte := I;
+      ContentEnd := I + 1;
+      Val := Map.Values[Map.Keys[0]];
+      if Val.HasRange and (not Val.Range.IsEmpty) then
+      begin
+        Result.ValStartByte := ByteOf(Val.Range.Start);
+        Result.ValEndByte := ByteOf(Val.Range.Stop) - 1;
+        ContentEnd := Result.ValEndByte + 1;
+      end;
     end;
   end
   else
   begin
-    Result.KeyStartByte := Result.Indent + 1;
-    Result.KeyEndByte := Result.TrimRightEnd;
-    Result.KeyName := StripQuotes(Copy(ARawLine, Result.KeyStartByte, Result.KeyEndByte - Result.KeyStartByte + 1), DummyQuoted);
+    StartByte := ByteOf(Root.Range.Start);
+    StopByte := ByteOf(Root.Range.Stop) - 1;
+    Result.KeyStartByte := StartByte;
+    Result.KeyEndByte := StopByte;
+    ContentEnd := StopByte + 1;
   end;
+
+  // What follows the last token of a parsed line is blanks and an optional comment.
+  for I := ContentEnd to Len do
+    if (ARaw[I] = '#') and ((I = 1) or IsSpaceOrTab(ARaw[I - 1])) then
+    begin
+      Result.CommentStartByte := I;
+      Break;
+    end;
+  if Result.CommentStartByte > 0 then
+    Result.EffectiveLen := Result.CommentStartByte - 1;
+  Result.TrimRightEnd := Result.EffectiveLen;
+  while (Result.TrimRightEnd > Result.Indent) and IsSpaceOrTab(ARaw[Result.TrimRightEnd]) do
+    Dec(Result.TrimRightEnd);
+
+  // Characters appended to repair the line are not part of it.
+  if Result.KeyEndByte > Result.TrimRightEnd then
+    Result.KeyEndByte := Result.TrimRightEnd;
+  if Result.ValEndByte > Result.TrimRightEnd then
+    Result.ValEndByte := Result.TrimRightEnd;
+  if (Result.ValStartByte > Result.TrimRightEnd) or (Result.ValEndByte < Result.ValStartByte) then
+  begin
+    Result.ValStartByte := 0;
+    Result.ValEndByte := 0;
+  end;
+  if (Result.SeqValStartByte > Result.TrimRightEnd) then
+    Result.SeqValStartByte := 0;
+
+  if (not Result.IsSeqItem) and (not Result.HasColon) and (Result.KeyEndByte >= Result.KeyStartByte) then
+    Result.KeyName := StripQuotes(
+      Copy(ARaw, Result.KeyStartByte, Result.KeyEndByte - Result.KeyStartByte + 1), DummyQuoted);
 end;
 
 function IsSequenceFieldKey(const AKey: string): Boolean;
@@ -664,7 +691,7 @@ begin
   begin
     if L = ACursorLine then
       Continue;
-    Parsed := ParseYamlLogicalLine(ADoc.GetLineText(L));
+    Parsed := ReadYamlLine(ADoc.GetLineText(L));
     if Parsed.IsBlank then
       Continue;
     if (AParentLine >= 0) and (Parsed.Indent < ATargetIndent) then
@@ -704,7 +731,7 @@ begin
   StackLen := 0;
   for L := 0 to APos.Line - 1 do
   begin
-    PriorLine := ParseYamlLogicalLine(ADoc.GetLineText(L));
+    PriorLine := ReadYamlLine(ADoc.GetLineText(L));
     if PriorLine.IsBlank or PriorLine.IsSeqItem then
       Continue;
     if PriorLine.HasColon and (PriorLine.KeyName <> '') then
@@ -720,7 +747,7 @@ begin
   end;
 
   RawCurLine := ADoc.GetLineText(APos.Line);
-  CurLine := ParseYamlLogicalLine(RawCurLine);
+  CurLine := ReadYamlLine(RawCurLine);
   CursorByte := Utf16ColToByteIndex(RawCurLine, APos.Character);
 
   if (CurLine.CommentStartByte > 0) and (CursorByte > CurLine.CommentStartByte) then
@@ -788,7 +815,7 @@ begin
     if ParentLineIdx >= 0 then
       for L := ParentLineIdx + 1 to APos.Line - 1 do
       begin
-        PriorLine := ParseYamlLogicalLine(ADoc.GetLineText(L));
+        PriorLine := ReadYamlLine(ADoc.GetLineText(L));
         if PriorLine.IsSeqItem then
         begin
           Result.IsFirstListElement := False;
@@ -913,7 +940,7 @@ begin
   for L := 0 to ADoc.LineCount - 1 do
   begin
     RawLine := ADoc.GetLineText(L);
-    Parsed := ParseYamlLogicalLine(RawLine);
+    Parsed := ReadYamlLine(RawLine);
     if Parsed.IsBlank or Parsed.IsSeqItem then
       Continue;
     if InToolchain and (Parsed.Indent <= ToolchainIndent) then
@@ -1134,7 +1161,7 @@ begin
     if CommitStr <> '' then
       Result := Result + ' (`' + CommitStr + '`)';
     if SizeStr <> '' then
-      Result := Result + ' — ' + SizeStr;
+      Result := Result + ' â€” ' + SizeStr;
     Result := Result + #10 + '- **Provisioning:** Installed automatically on `nik build`, or via `nik sdk install ' + ACand.Version + '`.';
   end
   else
@@ -1209,11 +1236,11 @@ begin
   end
   else if (ADoc <> nil) and (AKeyLine >= 0) and (AKeyLine < ADoc.LineCount) then
   begin
-    KeyIndent := ParseYamlLogicalLine(ADoc.GetLineText(AKeyLine)).Indent;
+    KeyIndent := ReadYamlLine(ADoc.GetLineText(AKeyLine)).Indent;
     for L := AKeyLine + 1 to ADoc.LineCount - 1 do
     begin
       SubLineRaw := ADoc.GetLineText(L);
-      Parsed := ParseYamlLogicalLine(SubLineRaw);
+      Parsed := ReadYamlLine(SubLineRaw);
       if Parsed.IsBlank then
         Continue;
       if Parsed.Indent <= KeyIndent then
@@ -1259,9 +1286,9 @@ begin
           if Lock.Packages[I].Rev <> '' then
             Result := Result + ' (`' + ShortCommitStr(Lock.Packages[I].Rev) + '`)';
           if Lock.Packages[I].Integrity <> '' then
-            Result := Result + #10 + '- **Integrity:** `' + Copy(Lock.Packages[I].Integrity, 1, 23) + '…`'
+            Result := Result + #10 + '- **Integrity:** `' + Copy(Lock.Packages[I].Integrity, 1, 23) + 'â€¦`'
           else if Lock.Packages[I].Sha256 <> '' then
-            Result := Result + #10 + '- **SHA-256:** `' + Copy(Lock.Packages[I].Sha256, 1, 16) + '…`';
+            Result := Result + #10 + '- **SHA-256:** `' + Copy(Lock.Packages[I].Sha256, 1, 16) + 'â€¦`';
           Break;
         end;
     end;
@@ -1592,7 +1619,7 @@ begin
   if ACanonicalParent = 'build' then
   begin
     AppendKeySpec(ASpecs, Result, MakeKeySpec('mode', yvkScalar, 'enum', 'objfpc', '-M<mode>',
-      'Default Object Pascal syntax mode (`objfpc`, `delphi`, …).',
+      'Default Object Pascal syntax mode (`objfpc`, `delphi`, â€¦).',
       'Sets the project-wide Free Pascal syntax mode (`objfpc`, `delphi`, `delphiunicode`, `fpc`, `tp`, `macpas`, `iso`, `extendedpascal`). Individual units may still override via `{$mode ...}`.'));
     AppendKeySpec(ASpecs, Result, MakeKeySpec('longStrings', yvkScalar, 'boolean', 'true', '-Sh / -Sh-',
       'Enable `AnsiString` (`{$H+}`) for `string` by default.',
@@ -1869,7 +1896,7 @@ var
 begin
   Result := '**`' + ASpec.Name + '`**';
   if ASpec.TypeLabel <> '' then
-    Result := Result + ' — *' + ASpec.TypeLabel + '*';
+    Result := Result + ' â€” *' + ASpec.TypeLabel + '*';
   Result := Result + #10#10 + ASpec.Summary;
 
   MetaLine := '';
@@ -1915,7 +1942,7 @@ begin
       Result.HasRange := True;
       Result.Range := Ctx.TokenRange;
       Result.Markdown :=
-        '**`' + Ctx.TokenText + '`** — *dependency alias*' + #10#10 +
+        '**`' + Ctx.TokenText + '`** â€” *dependency alias*' + #10#10 +
         'Local dependency identifier in `nik.yaml`. Maps to a `./` / `../` local path/archive, ' +
         'a `https://...@<semver|commit>` Git repository, or a `{ url, version, rev, path, subpath }` mapping.';
       DynamicExtra := DescribeDependencyLockStatus(AManifestPath, Ctx.TokenText, Ctx.InlineScalarValue, ADoc, APos.Line);
@@ -1947,7 +1974,7 @@ begin
       Result.HasRange := True;
       Result.Range := Ctx.TokenRange;
       Result.Markdown :=
-        '**`' + Ctx.TokenText + '`** — *custom build profile*' + #10#10 +
+        '**`' + Ctx.TokenText + '`** â€” *custom build profile*' + #10#10 +
         'Named profile overlay selectable via `nik build -p ' + Ctx.TokenText + '` or `Nikrun: Select Active Profile` in `nikrun.vscode`.';
       Exit;
     end;
@@ -2015,7 +2042,7 @@ begin
         Result.HasRange := True;
         Result.Range := Ctx.TokenRange;
         Result.Markdown :=
-          '**`' + EnumSpecs[I].Value + '`** — `' + EnumSpecs[I].Detail + '`' + #10#10 +
+          '**`' + EnumSpecs[I].Value + '`** â€” `' + EnumSpecs[I].Detail + '`' + #10#10 +
           EnumSpecs[I].Documentation;
         Exit;
       end;
@@ -2226,14 +2253,14 @@ begin
         if SdkCands[I].HasInstalled then
         begin
           if SdkCands[I].UpdateAvailable then
-            Item.Detail := Format('Free Pascal %s — installed (%s, update available)',
+            Item.Detail := Format('Free Pascal %s â€” installed (%s, update available)',
               [SdkCands[I].Version, SdkCands[I].Installed.Manifest.TargetTriplet])
           else
-            Item.Detail := Format('Free Pascal %s — installed (%s)',
+            Item.Detail := Format('Free Pascal %s â€” installed (%s)',
               [SdkCands[I].Version, SdkCands[I].Installed.Manifest.TargetTriplet]);
         end
         else if SdkCands[I].HasRemote then
-          Item.Detail := Format('Free Pascal %s — available online (%s)',
+          Item.Detail := Format('Free Pascal %s â€” available online (%s)',
             [SdkCands[I].Version, SdkCands[I].Remote.TargetTriplet])
         else
           Item.Detail := Format('Free Pascal %s', [SdkCands[I].Version]);
@@ -2362,7 +2389,7 @@ begin
   for L := 0 to ADoc.LineCount - 1 do
   begin
     RawLine := ADoc.GetLineText(L);
-    Parsed := ParseYamlLogicalLine(RawLine);
+    Parsed := ReadYamlLine(RawLine);
     if Parsed.IsBlank or Parsed.IsSeqItem or (not Parsed.HasColon) or (Parsed.KeyName = '') then
       Continue;
 
