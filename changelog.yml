@@ -1,5 +1,14 @@
 changelog:
+  - version: 0.3.0
+    changes:
+      added: []
+      changed: []
+      deprecated: []
+      fixed: []
+      removed: []
+      security: []
   - version: 0.2.0
+    date: '2026-11-27'
     changes:
       added:
         - 'Show available updates for installed SDKs in `nik sdk list` in a new `UPDATE` column (checked against the remote index, skipped silently when offline or with `--no-check`), with `updateAvailable` and `latestCommit` in `--json` output'
