@@ -913,6 +913,75 @@ program:
             $quickOut = (& $quickBuild.output.binaryPath).Trim()
             Assert-True ($quickOut -eq 'Hello from quick-init-app!') "Compiled nik init starter binary runs cleanly ($quickOut)"
 
+            # Generated unit 'nikmanifest' + Windows resource from the 'windows' section, --build-version override
+            $MetaDir = Join-Path $WorkDir 'meta-app'
+            New-Item -ItemType Directory -Force -Path (Join-Path $MetaDir 'src'), (Join-Path $MetaDir 'assets') | Out-Null
+            Copy-Item -Force (Join-Path $RepoRoot 'brand/ico/nikrun.ico') (Join-Path $MetaDir 'assets/app.ico')
+            $copyright = "$([char]0x00A9) 2026 Beispiel GmbH $([char]0x2013) `"Demo`" \ Test"
+            @"
+schemaVersion: 1
+program:
+  name: meta-app
+  version: 1.4.2
+  description: "Metadata demo"
+  entry: src/meta.pas
+  toolchain:
+    fpc: $($realInfo.fpcVersion)
+  build:
+    unitPaths: [src]
+  windows:
+    icon: assets/app.ico
+    info:
+      company: Beispiel GmbH
+      copyright: "$($copyright.Replace('\', '\\').Replace('"', '\"'))"
+      flags: [prerelease]
+    manifest:
+      dpiAwareness: perMonitorV2
+      utf8: true
+"@ | Set-Content -Path (Join-Path $MetaDir 'nik.yaml') -Encoding UTF8
+            @'
+program meta;
+{$mode objfpc}{$H+}
+uses nikmanifest;
+begin
+  WriteLn(ProjectName, '|', ProjectVersion, '|', ProjectVersionMajor, '.', ProjectVersionMinor, '.',
+    ProjectVersionPatch, '.', ProjectVersionBuild, '|', BuildProfile);
+end.
+'@ | Set-Content -Path (Join-Path $MetaDir 'src/meta.pas') -Encoding ASCII
+
+            $metaPlain = (Invoke-Nik -NikHome $TestHome -Arguments @('build', '-m', $MetaDir, '--json')).Output | ConvertFrom-Json
+            Assert-True ($metaPlain.success -eq $true -and (& $metaPlain.output.binaryPath).Trim() -eq 'meta-app|1.4.2|1.4.2.0|debug') 'nik build generates unit nikmanifest with the manifest version and build profile'
+
+            $metaTag = 'v0.2.0-build.16-channel.stable'
+            $metaTagged = (Invoke-Nik -NikHome $TestHome -Arguments @('build', '-m', $MetaDir, '--build-version', $metaTag, '--json')).Output | ConvertFrom-Json
+            Assert-True ($metaTagged.success -eq $true -and (& $metaTagged.output.binaryPath).Trim() -eq "meta-app|$metaTag|0.2.0.16|debug") 'nik build --build-version replaces the version in nikmanifest and derives the numeric parts from the build number'
+
+            if ($IsWin) {
+                $metaExe = $metaTagged.output.binaryPath
+                $metaInfo = (Get-Item $metaExe).VersionInfo
+                Assert-True ($metaInfo.CompanyName -eq 'Beispiel GmbH' -and $metaInfo.FileDescription -eq 'Metadata demo' -and $metaInfo.ProductName -eq 'meta-app') 'windows section writes company, description and product into the VERSIONINFO'
+                Assert-True ($metaInfo.FileVersion -eq $metaTag -and $metaInfo.FileMajorPart -eq 0 -and $metaInfo.FileMinorPart -eq 2 -and $metaInfo.FileBuildPart -eq 0 -and $metaInfo.FilePrivatePart -eq 16 -and $metaInfo.IsPreRelease) 'VERSIONINFO follows --build-version (numeric parts, prerelease flag)'
+                Assert-True ($metaInfo.LegalCopyright -ceq $copyright) 'VERSIONINFO keeps non-ASCII characters, quotes and backslashes of info strings intact'
+                if (-not ('NikTest.ResourceProbe' -as [type])) {
+                    Add-Type -Namespace NikTest -Name ResourceProbe -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("shell32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)] public static extern uint ExtractIconEx(string file, int index, System.IntPtr[] large, System.IntPtr[] small, uint count);
+[System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)] public static extern System.IntPtr LoadLibraryEx(string file, System.IntPtr reserved, uint flags);
+[System.Runtime.InteropServices.DllImport("kernel32.dll")] public static extern System.IntPtr FindResource(System.IntPtr module, System.IntPtr name, System.IntPtr type);
+'@
+                }
+                Assert-True ([NikTest.ResourceProbe]::ExtractIconEx($metaExe, -1, $null, $null, 0) -ge 1) 'windows.icon is embedded as the application icon'
+                $metaModule = [NikTest.ResourceProbe]::LoadLibraryEx($metaExe, [System.IntPtr]::Zero, 2)
+                Assert-True ($metaModule -ne [System.IntPtr]::Zero -and [NikTest.ResourceProbe]::FindResource($metaModule, [System.IntPtr]1, [System.IntPtr]24) -ne [System.IntPtr]::Zero) 'windows.manifest embeds the generated application manifest (RT_MANIFEST)'
+
+                # Without 'uses nikmanifest' the resource is never linked: nik says so
+                $NoUseDir = Join-Path $WorkDir 'meta-app-nouse'
+                New-Item -ItemType Directory -Force -Path (Join-Path $NoUseDir 'src') | Out-Null
+                (Get-Content -Raw (Join-Path $MetaDir 'nik.yaml')) -replace 'name: meta-app', 'name: nouse-app' -replace 'src/meta.pas', 'src/nouse.pas' -replace 'assets/app.ico', '../meta-app/assets/app.ico' | Set-Content -Path (Join-Path $NoUseDir 'nik.yaml') -Encoding UTF8
+                "program nouse;`nbegin`n  WriteLn('x');`nend." | Set-Content -Path (Join-Path $NoUseDir 'src/nouse.pas') -Encoding ASCII
+                $noUse = Invoke-NikSplitStreams -NikHome $TestHome -Arguments @('build', '-m', $NoUseDir)
+                Assert-True ($noUse.StdErr -match 'uses nikmanifest') 'nik build warns when the windows section is set but no source uses nikmanifest'
+            }
+
             # End-to-end nik build auto-install of a real missing FPC SDK via local HTTP index (--offline vs --json vs cached second run)
             $RealServerZipPath = Join-Path $ServerDir $RealZip.Name
             if (-not (Test-Path $RealServerZipPath)) {

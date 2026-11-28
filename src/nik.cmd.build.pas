@@ -53,6 +53,8 @@ begin
   WriteLn('  -p, --profile <NAME>   Build with the named profile from nik.yaml (default: debug)');
   WriteLn('  -m, --manifest <PATH>  Path to nik.yaml or project directory (same as a SOURCE path)');
   WriteLn('      --clean            Clean profile build cache (.nik/cache) and force rebuild (-B)');
+  WriteLn('      --build-version <V> Use <V> instead of ''version'' from nik.yaml for this build (e.g. a CI tag);');
+  WriteLn('                         it feeds the generated unit nikmanifest and the Windows resource');
   WriteLn('      --locked           Require nik.lock to be up to date without modifying it');
   WriteLn('      --offline          Use only locally installed SDKs and cached packages without network');
   WriteLn('  -v, --verbose          Show full compiler invocation and note/hint diagnostics');
@@ -332,6 +334,10 @@ begin
     end;
   end;
 
+  if not FlagJson then
+    for I := 0 to High(Prepared.Warnings) do
+      WriteLn(StdErr, '  ' + StyleYellow('warning:') + ' ' + Prepared.Warnings[I]);
+
   if (not FlagJson) and (not AOpts.Quiet) then
   begin
     WriteStep(Format('Building %s [%s] (FPC %s, %s)...',
@@ -426,6 +432,10 @@ begin
       Opts.Target.ManifestOverride := Val
     else if Arg = '--clean' then
       Opts.Clean := True
+    else if Arg = '--build-version' then
+      Opts.Target.BuildVersion := NextOptValue(AArgs, I, Arg)
+    else if SplitOptEq(Arg, '--build-version', Val) then
+      Opts.Target.BuildVersion := Val
     else if Arg = '--locked' then
       Opts.Target.Locked := True
     else if Arg = '--offline' then

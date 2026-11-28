@@ -115,7 +115,7 @@ implementation
 uses
   StrUtils, nik.platform, nik.paths, nik.fs, nik.sha256, nik.sdk.config, nik.sdk.manager,
   nik.test.discovery,
-  nik.manifest.io, nik.manifest.resolve, nik.project,
+  nik.manifest.io, nik.manifest.resolve, nik.project, nik.gen,
   nik.pkg.types, nik.pkg.resolve, nikrun.lsp.utf16;
 
 procedure AppendArg(var AArgs: TStringArray; const AArg: string);
@@ -598,6 +598,7 @@ var
   I, ErrLine0: Integer;
   PkgOpts: TPackageResolveOptions;
   PkgRes: TPackageResolutionResult;
+  Generated: TGeneratedFiles;
 begin
   AContext := Default(TNikWorkspaceContext);
   AWarningMsg := '';
@@ -660,6 +661,20 @@ begin
         AppendUniqueDir(AContext.UnitPaths, ResolveRelativePath(AContext.ProjectDir, ResolvedCfg.UnitPaths[I]));
       for I := 0 to High(ResolvedCfg.IncludePaths) do
         AppendUniqueDir(AContext.IncludePaths, ResolveRelativePath(AContext.ProjectDir, ResolvedCfg.IncludePaths[I]));
+
+      // The generated unit 'nikmanifest' (never the Windows resource) keeps 'uses nikmanifest' resolvable
+      try
+        Generated := GenerateNikManifestUnit(ResolvedCfg, AContext.Sdk,
+          JoinPath(JoinPath(JoinPath(AContext.ProjectDir, '.nik'), 'cache'),
+            SanitizeCacheKey(AContext.Sdk.Manifest.SdkId + '-' + AContext.ProfileName + '-lsp' +
+              IfThen(AForTest, '-test', '')) + '-gen'));
+        if Generated.Generated then
+          AppendUniqueDir(AContext.UnitPaths, Generated.Dir);
+      except
+        on E: Exception do
+          if AWarningMsg = '' then
+            AWarningMsg := E.Message;
+      end;
 
       // Resolve direct & transitive local/cached packages non-blockingly (never stall LSP on network I/O)
       PkgOpts := Default(TPackageResolveOptions);

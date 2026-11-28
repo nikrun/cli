@@ -848,19 +848,226 @@ begin
   ReadOptStrList(ASec, 'fpcArgs', AContext, AManifestPath, ABuild.HasFpcArgs, ABuild.FpcArgs);
 end;
 
+{ Returns the canonical spelling of AValue from AAllowed (case-insensitive), or '' when not allowed. }
+function CanonicalChoice(const AValue: string; const AAllowed: array of string): string;
+var
+  I: Integer;
+begin
+  for I := Low(AAllowed) to High(AAllowed) do
+    if SameText(AValue, AAllowed[I]) then
+      Exit(AAllowed[I]);
+  Result := '';
+end;
+
+function JoinChoices(const AAllowed: array of string): string;
+var
+  I: Integer;
+begin
+  Result := '';
+  for I := Low(AAllowed) to High(AAllowed) do
+  begin
+    if Result <> '' then
+      Result := Result + ' | ';
+    Result := Result + AAllowed[I];
+  end;
+end;
+
+function ParseChoice(ANode: TYamlNode; const AFieldName, AManifestPath: string;
+  const AAllowed: array of string): string;
+begin
+  Result := CanonicalChoice(ExpectScalarString(ANode, AFieldName, AManifestPath), AAllowed);
+  if Result = '' then
+    RaiseManifestError(AManifestPath, ANode.Line,
+      Format('Invalid ''%s'' ''%s'' (expected %s).',
+        [AFieldName, Trim(ANode.ScalarValue), JoinChoices(AAllowed)]));
+end;
+
+function ParseChoiceList(ANode: TYamlNode; const AFieldName, AManifestPath: string;
+  const AAllowed: array of string): TStringArray;
+var
+  I: Integer;
+  Raw: TStringArray;
+begin
+  Raw := ExpectStringList(ANode, AFieldName, AManifestPath);
+  Result := nil;
+  SetLength(Result, Length(Raw));
+  for I := 0 to High(Raw) do
+  begin
+    if SameText(Raw[I], '$reset') then
+    begin
+      Result[I] := '$reset';
+      Continue;
+    end;
+    Result[I] := CanonicalChoice(Raw[I], AAllowed);
+    if Result[I] = '' then
+      RaiseManifestError(AManifestPath, ANode.GetItem(I).Line,
+        Format('Invalid item ''%s'' in ''%s'' (expected %s).', [Raw[I], AFieldName, JoinChoices(AAllowed)]));
+  end;
+end;
+
+procedure ParseWindowsInfo(ASec: TYamlNode; const AContext, AManifestPath: string;
+  out AInfo: TWindowsInfoOverlay);
+const
+  INFO_KEYS: array[0..7] of string = (
+    'company', 'product', 'description', 'copyright', 'comments',
+    'internalName', 'originalFilename', 'flags'
+  );
+  FLAG_CHOICES: array[0..2] of string = ('debug', 'prerelease', 'privateBuild');
+var
+  Sub: TYamlNode;
+begin
+  AInfo := Default(TWindowsInfoOverlay);
+  if (ASec = nil) or (ASec.Kind = ynkNull) then
+    Exit;
+  if ASec.Kind <> ynkMapping then
+    RaiseManifestError(AManifestPath, ASec.Line, Format('''%s'' must be a mapping.', [AContext]));
+  ValidateAllowedKeys(ASec, INFO_KEYS, AContext, AManifestPath);
+
+  ReadOptStr(ASec, 'company', AContext, AManifestPath, True, AInfo.HasCompany, AInfo.Company);
+  ReadOptStr(ASec, 'product', AContext, AManifestPath, True, AInfo.HasProduct, AInfo.Product);
+  ReadOptStr(ASec, 'description', AContext, AManifestPath, True, AInfo.HasDescription, AInfo.Description);
+  ReadOptStr(ASec, 'copyright', AContext, AManifestPath, True, AInfo.HasCopyright, AInfo.Copyright);
+  ReadOptStr(ASec, 'comments', AContext, AManifestPath, True, AInfo.HasComments, AInfo.Comments);
+  ReadOptStr(ASec, 'internalName', AContext, AManifestPath, True, AInfo.HasInternalName, AInfo.InternalName);
+  ReadOptStr(ASec, 'originalFilename', AContext, AManifestPath, True, AInfo.HasOriginalFilename,
+    AInfo.OriginalFilename);
+
+  Sub := ASec.Find('flags');
+  if Sub <> nil then
+  begin
+    AInfo.HasFlags := True;
+    AInfo.Flags := ParseChoiceList(Sub, AContext + '.flags', AManifestPath, FLAG_CHOICES);
+  end;
+end;
+
+procedure ParseWindowsManifest(ASec: TYamlNode; const AContext, AManifestPath: string;
+  out AManifest: TWindowsManifestOverlay);
+const
+  MANIFEST_KEYS: array[0..5] of string = (
+    'executionLevel', 'dpiAwareness', 'longPaths', 'utf8', 'supportedOS', 'file'
+  );
+  EXECUTION_LEVELS: array[0..2] of string = ('asInvoker', 'highestAvailable', 'requireAdministrator');
+  DPI_AWARENESS: array[0..3] of string = ('none', 'system', 'perMonitor', 'perMonitorV2');
+  SUPPORTED_OS: array[0..3] of string = ('win7', 'win8', 'win81', 'win10');
+var
+  Sub: TYamlNode;
+begin
+  AManifest := Default(TWindowsManifestOverlay);
+  AManifest.Present := True;
+  if ASec.Kind = ynkNull then
+    Exit;
+  if ASec.Kind <> ynkMapping then
+    RaiseManifestError(AManifestPath, ASec.Line, Format('''%s'' must be a mapping.', [AContext]));
+  ValidateAllowedKeys(ASec, MANIFEST_KEYS, AContext, AManifestPath);
+
+  Sub := ASec.Find('executionLevel');
+  if Sub <> nil then
+  begin
+    AManifest.HasExecutionLevel := True;
+    AManifest.ExecutionLevel := ParseChoice(Sub, AContext + '.executionLevel', AManifestPath, EXECUTION_LEVELS);
+  end;
+  Sub := ASec.Find('dpiAwareness');
+  if Sub <> nil then
+  begin
+    AManifest.HasDpiAwareness := True;
+    AManifest.DpiAwareness := ParseChoice(Sub, AContext + '.dpiAwareness', AManifestPath, DPI_AWARENESS);
+  end;
+  ReadOptBool(ASec, 'longPaths', AContext, AManifestPath, AManifest.HasLongPaths, AManifest.LongPaths);
+  ReadOptBool(ASec, 'utf8', AContext, AManifestPath, AManifest.HasUtf8, AManifest.Utf8);
+  Sub := ASec.Find('supportedOS');
+  if Sub <> nil then
+  begin
+    AManifest.HasSupportedOS := True;
+    AManifest.SupportedOS := ParseChoiceList(Sub, AContext + '.supportedOS', AManifestPath, SUPPORTED_OS);
+  end;
+  ReadOptStr(ASec, 'file', AContext, AManifestPath, False, AManifest.HasManifestFile, AManifest.ManifestFile);
+
+  if AManifest.HasManifestFile and
+     (AManifest.HasExecutionLevel or AManifest.HasDpiAwareness or AManifest.HasLongPaths or
+      AManifest.HasUtf8 or AManifest.HasSupportedOS) then
+    RaiseManifestError(AManifestPath, ASec.Find('file').Line,
+      Format('''%s.file'' embeds a hand-written manifest and cannot be combined with other ''%s'' keys.',
+        [AContext, AContext]));
+end;
+
+procedure ParseWindowsSection(ASec: TYamlNode; const AContext, AManifestPath: string;
+  out AWindows: TWindowsOverlay);
+const
+  WINDOWS_KEYS: array[0..4] of string = (
+    'icon', 'version', 'info', 'manifest', 'resources'
+  );
+var
+  Sub: TYamlNode;
+  Parsed: TWindowsVersion;
+  I: Integer;
+  Ext: string;
+begin
+  AWindows := Default(TWindowsOverlay);
+  AWindows.Present := True;
+  if ASec.Kind = ynkNull then
+    Exit;
+  if ASec.Kind <> ynkMapping then
+    RaiseManifestError(AManifestPath, ASec.Line, Format('''%s'' must be a mapping.', [AContext]));
+  ValidateAllowedKeys(ASec, WINDOWS_KEYS, AContext, AManifestPath);
+
+  Sub := ASec.Find('icon');
+  if Sub <> nil then
+  begin
+    AWindows.HasIcon := True;
+    AWindows.Icon := ExpectScalarString(Sub, AContext + '.icon', AManifestPath);
+    if not SameText(ExtractFileExt(AWindows.Icon), '.ico') then
+      RaiseManifestError(AManifestPath, Sub.Line,
+        Format('''%s.icon'' must point to an .ico file (got ''%s'').', [AContext, AWindows.Icon]));
+  end;
+
+  Sub := ASec.Find('version');
+  if Sub <> nil then
+  begin
+    AWindows.HasVersion := True;
+    AWindows.Version := ExpectScalarString(Sub, AContext + '.version', AManifestPath);
+    if not TryParseWindowsVersion(AWindows.Version, Parsed) then
+      RaiseManifestError(AManifestPath, Sub.Line,
+        Format('Invalid ''%s.version'' ''%s'' (expected A.B.C or A.B.C.D with numbers from 0 to 65535).',
+          [AContext, AWindows.Version]));
+  end;
+
+  Sub := ASec.Find('info');
+  if Sub <> nil then
+    ParseWindowsInfo(Sub, AContext + '.info', AManifestPath, AWindows.Info);
+
+  Sub := ASec.Find('manifest');
+  if Sub <> nil then
+    ParseWindowsManifest(Sub, AContext + '.manifest', AManifestPath, AWindows.Manifest);
+
+  Sub := ASec.Find('resources');
+  if Sub <> nil then
+  begin
+    AWindows.HasResources := True;
+    AWindows.Resources := ExpectStringList(Sub, AContext + '.resources', AManifestPath);
+    for I := 0 to High(AWindows.Resources) do
+    begin
+      Ext := LowerCase(ExtractFileExt(AWindows.Resources[I]));
+      if (Ext <> '.rc') and (Ext <> '.res') and (AWindows.Resources[I] <> '$reset') then
+        RaiseManifestError(AManifestPath, Sub.GetItem(I).Line,
+          Format('''%s.resources'' entries must be .rc or .res files (got ''%s'').',
+            [AContext, AWindows.Resources[I]]));
+    end;
+  end;
+end;
+
 procedure ParseOverlayNode(AMap: TYamlNode; AKind: TManifestKind; AScope: TOverlayScope;
   const AContextPrefix, AManifestPath: string; out AOverlay: TManifestOverlay);
 const
-  ROOT_ARTIFACT_KEYS: array[0..13] of string = (
+  ROOT_ARTIFACT_KEYS: array[0..14] of string = (
     'name', 'version', 'description', 'license', 'repository', 'authors',
     'entry', 'output',
-    'toolchain', 'build', 'dependencies', 'test', 'targets', 'profiles'
+    'toolchain', 'build', 'windows', 'dependencies', 'test', 'targets', 'profiles'
   );
   TEST_OVERLAY_KEYS: array[0..2] of string = (
     'toolchain', 'build', 'dependencies'
   );
-  SUB_OVERLAY_KEYS: array[0..6] of string = (
-    'name', 'version', 'entry', 'output', 'toolchain', 'build', 'dependencies'
+  SUB_OVERLAY_KEYS: array[0..7] of string = (
+    'name', 'version', 'entry', 'output', 'toolchain', 'build', 'windows', 'dependencies'
   );
   TEMPLATE_ROOT_KEYS: array[0..9] of string = (
     'version', 'description', 'license', 'repository', 'authors',
@@ -986,6 +1193,16 @@ begin
   Sec := AMap.Find('build');
   if (Sec <> nil) and (Sec.Kind <> ynkNull) then
     ParseBuildSection(Sec, AContextPrefix + '.build', AManifestPath, AOverlay.Build);
+
+  // windows
+  Sec := AMap.Find('windows');
+  if Sec <> nil then
+  begin
+    if AKind = mkPackage then
+      RaiseManifestError(AManifestPath, Sec.Line,
+        '''package'' compiles into other projects without a binary of its own and cannot specify ''windows'' (use ''program'' or ''library'').');
+    ParseWindowsSection(Sec, AContextPrefix + '.windows', AManifestPath, AOverlay.Windows);
+  end;
 
   // dependencies
   Sec := AMap.Find('dependencies');

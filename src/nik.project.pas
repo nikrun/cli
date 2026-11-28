@@ -24,6 +24,8 @@ type
     Offline: Boolean;
     AutoInstallSdk: Boolean;
     QuietSdkInstall: Boolean;
+    // Replaces 'version' of the manifest for this build (CI tag); feeds nikmanifest and the Windows resource.
+    BuildVersion: string;
   end;
 
   TPreparedProjectTarget = record
@@ -33,6 +35,8 @@ type
     SdkAutoInstalled: Boolean;
     Packages: TPackageResolutionResult;
     Compile: TPreparedCompile;
+    // Hints about the generated files (e.g. 'windows' section without 'uses nikmanifest')
+    Warnings: TStringArray;
   end;
 
   TProjectCompileResult = record
@@ -44,6 +48,9 @@ type
   end;
 
 function SanitizeCacheKey(const ARaw: string): string;
+{ Checkout-local directory for the unit/object files of one SDK + profile (+ cache suffix). }
+function ResolveUnitOutputDir(const AManifest: TResolvedManifest; const ASdk: TInstalledSdk;
+  const ACacheSuffix: string): string;
 procedure SplitTripletSpec(const ATriplet: string; out ACpu, AOs: string);
 function ResolveOutputBinaryPath(const AProjectDir, ARawOutput, ATargetOs: string;
   AArtifactKind: TCompileArtifactKind): string;
@@ -69,7 +76,7 @@ implementation
 
 uses
   nik.platform, nik.paths, nik.term, nik.sdk.config, nik.sdk.manager,
-  nik.manifest.io, nik.manifest.resolve, nik.compiler, nik.pkg.resolve;
+  nik.manifest.io, nik.manifest.resolve, nik.compiler, nik.pkg.resolve, nik.gen;
 
 function SanitizeCacheKey(const ARaw: string): string;
 var
@@ -257,6 +264,23 @@ begin
   end;
 end;
 
+function ResolveUnitOutputDir(const AManifest: TResolvedManifest; const ASdk: TInstalledSdk;
+  const ACacheSuffix: string): string;
+var
+  CacheKey, SuffixClean: string;
+begin
+  CacheKey := ASdk.Manifest.SdkId + '-' + AManifest.ProfileName;
+  SuffixClean := Trim(ACacheSuffix);
+  if SuffixClean <> '' then
+    CacheKey := CacheKey + '-' + SuffixClean
+  else if AManifest.ForTest then
+    CacheKey := CacheKey + '-test';
+
+  Result := JoinPath(
+    JoinPath(JoinPath(AManifest.ProjectDir, '.nik'), 'cache'),
+    SanitizeCacheKey(CacheKey));
+end;
+
 function BuildCompileSpecFromManifest(const AManifest: TResolvedManifest;
   const ASdk: TInstalledSdk; const AFpcCfgPath: string;
   const APackages: TPackageResolutionResult;
@@ -265,7 +289,6 @@ function BuildCompileSpecFromManifest(const AManifest: TResolvedManifest;
   const AExtraUnitPaths: TStringArray): TCompileSpec;
 var
   I: Integer;
-  CacheKey, SuffixClean: string;
   EffUnitPaths, EffIncludePaths, EffLibPaths, EffObjPaths, EffManifestFiles, EffLinkLibs: TStringArray;
 begin
   Result := Default(TCompileSpec);
@@ -349,16 +372,7 @@ begin
     Result.OutputBinaryPath := ResolveOutputBinaryPath(
       AManifest.ProjectDir, AManifest.Output, ASdk.Manifest.TargetOs, AArtifactKind);
 
-  CacheKey := ASdk.Manifest.SdkId + '-' + AManifest.ProfileName;
-  SuffixClean := Trim(ACacheSuffix);
-  if SuffixClean <> '' then
-    CacheKey := CacheKey + '-' + SuffixClean
-  else if AManifest.ForTest then
-    CacheKey := CacheKey + '-test';
-
-  Result.UnitOutputDir := JoinPath(
-    JoinPath(JoinPath(AManifest.ProjectDir, '.nik'), 'cache'),
-    SanitizeCacheKey(CacheKey));
+  Result.UnitOutputDir := ResolveUnitOutputDir(AManifest, ASdk, ACacheSuffix);
 
   // Dialect & syntax
   Result.Mode := AManifest.Mode;
@@ -457,6 +471,9 @@ var
   ArtifactKind: TCompileArtifactKind;
   PkgOpts: TPackageResolveOptions;
   Spec: TCompileSpec;
+  Generated: TGeneratedFiles;
+  ExtraUnitPaths: TStringArray;
+  UnitOutputDir: string;
 begin
   ASdkAutoInstalled := False;
   Result := Default(TPreparedProjectTarget);
@@ -502,6 +519,8 @@ begin
     Result.Manifest.Entry := Trim(AOptions.EntryOverride);
   if Trim(AOptions.OutputOverride) <> '' then
     Result.Manifest.Output := Trim(AOptions.OutputOverride);
+  if Trim(AOptions.BuildVersion) <> '' then
+    Result.Manifest.ProjectVersion := Trim(AOptions.BuildVersion);
 
   // 4. Resolve direct & transitive local/remote/archive dependencies (auto-hydrating cache & nik.lock)
   PkgOpts := Default(TPackageResolveOptions);
@@ -514,8 +533,23 @@ begin
 
   // 5. Translate resolved manifest + SDK + packages into neutral TCompileSpec & prepare compiler invocation
   ArtifactKind := ResolveTargetArtifactKind(AOptions.Role, Result.Manifest.Kind, AOptions.CheckOnly);
+
+  // Generated files (unit nikmanifest, Windows resource) live next to the unit cache, not inside it,
+  // so a clean rebuild of the cache does not delete them.
+  UnitOutputDir := ResolveUnitOutputDir(Result.Manifest, Result.Sdk, AOptions.CacheSuffix);
+  Generated := GenerateProjectFiles(Result.Manifest, Result.Sdk, UnitOutputDir + '-gen');
+  if Generated.UnitChanged then
+    DiscardCompiledNikManifest(UnitOutputDir);
+  Result.Warnings := Generated.Warnings;
+  ExtraUnitPaths := Copy(AOptions.ExtraUnitPaths);
+  if Generated.Generated then
+  begin
+    SetLength(ExtraUnitPaths, Length(ExtraUnitPaths) + 1);
+    ExtraUnitPaths[High(ExtraUnitPaths)] := Generated.Dir;
+  end;
+
   Spec := BuildCompileSpecFromManifest(Result.Manifest, Result.Sdk, FpcCfgPath,
-    Result.Packages, ArtifactKind, AOptions.Clean, AOptions.CacheSuffix, AOptions.ExtraUnitPaths);
+    Result.Packages, ArtifactKind, AOptions.Clean, AOptions.CacheSuffix, ExtraUnitPaths);
 
   Result.Compile := PrepareCompile(Spec);
 end;

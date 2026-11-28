@@ -113,6 +113,39 @@ begin
     MergeAdditiveList(ADst, ASrc, ACaseInsensitive);
 end;
 
+procedure ApplyWindowsOverlay(var AConfig: TResolvedWindows; const AOverlay: TWindowsOverlay);
+const
+  PATH_CI = {$IFDEF WINDOWS}True{$ELSE}False{$ENDIF};
+begin
+  if not AOverlay.Present then
+    Exit;
+  AConfig.Present := True;
+
+  ApplyOptStr(AOverlay.HasIcon, AOverlay.Icon, AConfig.Icon);
+  ApplyOptStr(AOverlay.HasVersion, AOverlay.Version, AConfig.Version);
+
+  ApplyOptStr(AOverlay.Info.HasCompany, AOverlay.Info.Company, AConfig.Company);
+  ApplyOptStr(AOverlay.Info.HasProduct, AOverlay.Info.Product, AConfig.Product);
+  ApplyOptStr(AOverlay.Info.HasDescription, AOverlay.Info.Description, AConfig.Description);
+  ApplyOptStr(AOverlay.Info.HasCopyright, AOverlay.Info.Copyright, AConfig.Copyright);
+  ApplyOptStr(AOverlay.Info.HasComments, AOverlay.Info.Comments, AConfig.Comments);
+  ApplyOptStr(AOverlay.Info.HasInternalName, AOverlay.Info.InternalName, AConfig.InternalName);
+  ApplyOptStr(AOverlay.Info.HasOriginalFilename, AOverlay.Info.OriginalFilename, AConfig.OriginalFilename);
+  ApplyOptList(AOverlay.Info.HasFlags, AOverlay.Info.Flags, AConfig.Flags, True);
+
+  if AOverlay.Manifest.Present then
+    AConfig.HasManifest := True;
+  ApplyOptStr(AOverlay.Manifest.HasExecutionLevel, AOverlay.Manifest.ExecutionLevel, AConfig.ExecutionLevel);
+  ApplyOptStr(AOverlay.Manifest.HasDpiAwareness, AOverlay.Manifest.DpiAwareness, AConfig.DpiAwareness);
+  ApplyOptTrackedBool(AOverlay.Manifest.HasLongPaths, AOverlay.Manifest.LongPaths,
+    AConfig.HasLongPaths, AConfig.LongPaths);
+  ApplyOptTrackedBool(AOverlay.Manifest.HasUtf8, AOverlay.Manifest.Utf8, AConfig.HasUtf8, AConfig.Utf8);
+  ApplyOptList(AOverlay.Manifest.HasSupportedOS, AOverlay.Manifest.SupportedOS, AConfig.SupportedOS, True);
+  ApplyOptStr(AOverlay.Manifest.HasManifestFile, AOverlay.Manifest.ManifestFile, AConfig.ManifestFile);
+
+  ApplyOptList(AOverlay.HasResources, AOverlay.Resources, AConfig.Resources, PATH_CI);
+end;
+
 procedure ApplyOverlayToManifest(var AConfig: TResolvedManifest; const AOverlay: TManifestOverlay);
 const
   PATH_CI = {$IFDEF WINDOWS}True{$ELSE}False{$ENDIF};
@@ -186,6 +219,8 @@ begin
   ApplyOptList(AOverlay.Build.HasLinkLibraries, AOverlay.Build.LinkLibraries, AConfig.LinkLibraries, False);
   ApplyOptList(AOverlay.Build.HasLinkerArgs, AOverlay.Build.LinkerArgs, AConfig.LinkerArgs, False);
   ApplyOptList(AOverlay.Build.HasFpcArgs, AOverlay.Build.FpcArgs, AConfig.FpcArgs, False);
+
+  ApplyWindowsOverlay(AConfig.Windows, AOverlay.Windows);
 
   if AOverlay.HasDependencies then
     MergeDependencies(AConfig.Dependencies, AOverlay.Dependencies);
@@ -427,6 +462,12 @@ begin
       raise ENikError.CreateFmt('Unsupported TManifestKind ordinal: %d', [Ord(Result.Kind)]);
     end;
   end;
+
+  if (Result.Windows.ManifestFile <> '') and
+     ((Result.Windows.ExecutionLevel <> '') or (Result.Windows.DpiAwareness <> '') or
+      Result.Windows.HasLongPaths or Result.Windows.HasUtf8 or (Length(Result.Windows.SupportedOS) > 0)) then
+    RaiseManifestError(AManifest.ManifestPath, AManifest.RootLine,
+      '''windows.manifest.file'' embeds a hand-written manifest and cannot be combined with other ''windows.manifest'' keys (check the targets and profile overlays).');
 
   if ARequireToolchain and (Result.Kind <> mkPackage) and (Trim(Result.FpcSpec) = '') then
     RaiseManifestError(AManifest.ManifestPath, AManifest.RootLine,

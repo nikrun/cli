@@ -135,6 +135,15 @@ program:
     modeSwitches: [advancedRecords, typeHelpers]
     unitPaths: [src]
 
+  windows:                  # Windows only: icon, VERSIONINFO (Explorer properties) and application manifest
+    icon: assets/my-app.ico
+    info:
+      company: Example GmbH
+      copyright: "Copyright (c) 2026 Example GmbH"
+    manifest:
+      dpiAwareness: perMonitorV2
+      utf8: true
+
   profiles:
     debug:
       build:
@@ -151,6 +160,8 @@ program:
       toolchain:
         fpc: "3.3.1"
 ```
+
+Every `program` and `library` build also gets a generated unit **`nikmanifest`** with `ProjectName`, `ProjectVersion`, `ProjectVersionMajor/Minor/Patch/Build`, `ProjectDescription`, `ProjectLicense`, `ProjectRepository`, `ProjectAuthors`, `BuildProfile`, `BuildTarget` and `BuildFpcVersion`. One `uses nikmanifest;` line in the program exposes them and links the `windows` resource. `nik build --build-version <tag>` replaces `version` for a build (for example a CI tag); it feeds the unit and the Windows `VERSIONINFO`.
 
 ---
 
@@ -194,6 +205,9 @@ cli/
 │   ├── nik.manifest.types.pas   # nik.yaml domain records, overlay records & TResolvedManifest
 │   ├── nik.manifest.io.pas      # nik.yaml discovery, YAML deserialization & strict schema validation
 │   ├── nik.manifest.resolve.pas # In-memory targets, test & profiles overlay resolver
+│   ├── nik.gen.pas              # Writes generated project files (unit nikmanifest, Windows resource via fpcres)
+│   ├── nik.gen.manifest.pas     # Source text of the generated unit nikmanifest
+│   ├── nik.gen.winres.pas       # .rc script & application manifest XML for the `windows` section
 │   ├── nik.compiler.diag.pas    # Free Pascal (ppc*) diagnostic parser (file, line, col, code, severity)
 │   ├── nik.compiler.types.pas   # Manifest-agnostic compiler contract (TCompileSpec & TCompileResult)
 │   ├── nik.compiler.pas         # Hermetic ppc* flag builder & compiler process runner

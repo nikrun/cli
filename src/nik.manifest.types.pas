@@ -117,6 +117,54 @@ type
     FpcArgs: TStringArray;
   end;
 
+  // 'windows' section: VERSIONINFO strings, application manifest switches, icon and extra resources
+  TWindowsInfoOverlay = record
+    HasCompany: Boolean;
+    Company: string;
+    HasProduct: Boolean;
+    Product: string;
+    HasDescription: Boolean;
+    Description: string;
+    HasCopyright: Boolean;
+    Copyright: string;
+    HasComments: Boolean;
+    Comments: string;
+    HasInternalName: Boolean;
+    InternalName: string;
+    HasOriginalFilename: Boolean;
+    OriginalFilename: string;
+    HasFlags: Boolean;
+    Flags: TStringArray;
+  end;
+
+  TWindowsManifestOverlay = record
+    Present: Boolean;
+    HasExecutionLevel: Boolean;
+    ExecutionLevel: string;
+    HasDpiAwareness: Boolean;
+    DpiAwareness: string;
+    HasLongPaths: Boolean;
+    LongPaths: Boolean;
+    HasUtf8: Boolean;
+    Utf8: Boolean;
+    HasSupportedOS: Boolean;
+    SupportedOS: TStringArray;
+    HasManifestFile: Boolean;
+    ManifestFile: string;
+  end;
+
+  TWindowsOverlay = record
+    Present: Boolean;
+    HasIcon: Boolean;
+    Icon: string;
+    HasVersion: Boolean;
+    Version: string;
+    Info: TWindowsInfoOverlay;
+    Manifest: TWindowsManifestOverlay;
+    HasResources: Boolean;
+    Resources: TStringArray;
+  end;
+
   TManifestOverlay = record
     // Artifact metadata & entry/output
     HasName: Boolean;
@@ -140,6 +188,7 @@ type
 
     Toolchain: TToolchainOverlay;
     Build: TBuildOverlay;
+    Windows: TWindowsOverlay;
 
     HasDependencies: Boolean;
     Dependencies: TDependencySpecArray;
@@ -182,6 +231,32 @@ type
     Hints: Boolean;
     Notes: Boolean;
     Suppress: TStringArray;
+  end;
+
+  // Effective 'windows' section after all overlays; empty strings mean "not set" (defaults are
+  // derived by the resource generator from the rest of the resolved manifest).
+  TResolvedWindows = record
+    Present: Boolean;
+    Icon: string;
+    Version: string;
+    Company: string;
+    Product: string;
+    Description: string;
+    Copyright: string;
+    Comments: string;
+    InternalName: string;
+    OriginalFilename: string;
+    Flags: TStringArray;
+    HasManifest: Boolean;
+    ExecutionLevel: string;
+    DpiAwareness: string;
+    HasLongPaths: Boolean;
+    LongPaths: Boolean;
+    HasUtf8: Boolean;
+    Utf8: Boolean;
+    SupportedOS: TStringArray;
+    ManifestFile: string;
+    Resources: TStringArray;
   end;
 
   TResolvedManifest = record
@@ -244,11 +319,25 @@ type
     LinkerArgs: TStringArray;
     FpcArgs: TStringArray;
 
+    Windows: TResolvedWindows;
+
     Dependencies: TDependencySpecArray;
   end;
 
 function ManifestKindToString(AKind: TManifestKind): string;
 procedure RaiseManifestError(const APath: string; ALine: Integer; const AMsg: string);
+
+type
+  { Numeric Windows file/product version (FILEVERSION major.minor.patch.build, each 0..65535). }
+  TWindowsVersion = array[0..3] of Word;
+
+{ Parses 'A.B.C' or 'A.B.C.D' where every part is a number from 0 to 65535. }
+function TryParseWindowsVersion(const AText: string; out AVersion: TWindowsVersion): Boolean;
+
+{ Derives the numeric version from a version string such as '1.4.2' (-> 1.4.2.0) or a CI tag such as
+  'v0.2.0-build.16-channel.stable' (-> 0.2.0.16). Returns False (and 0.0.0.0) when no
+  MAJOR.MINOR.PATCH prefix can be read. }
+function TryDeriveWindowsVersion(const AVersionText: string; out AVersion: TWindowsVersion): Boolean;
 
 { A program or library name becomes a file name (default output bin/<name>), so it must be a
   plain name. A package name may be a relative path like owner/pkg but must not leave its base. }
@@ -267,6 +356,98 @@ begin
     mkPackage: Result := 'package';
   else
     raise ENikError.CreateFmt('Unsupported TManifestKind ordinal: %d', [Ord(AKind)]);
+  end;
+end;
+
+function TryParseWindowsVersion(const AText: string; out AVersion: TWindowsVersion): Boolean;
+var
+  I, Part: Integer;
+  Value: Int64;
+  HasDigits, Failed: Boolean;
+  Ch: Char;
+begin
+  for I := 0 to High(AVersion) do
+    AVersion[I] := 0;
+  Part := 0;
+  Value := 0;
+  HasDigits := False;
+  Failed := False;
+  // The end of the text acts as the final separator.
+  for I := 1 to Length(AText) + 1 do
+  begin
+    if I <= Length(AText) then
+      Ch := AText[I]
+    else
+      Ch := '.';
+    if Ch = '.' then
+    begin
+      Failed := (not HasDigits) or (Part > High(AVersion));
+      if Failed then
+        Break;
+      AVersion[Part] := Word(Value);
+      Inc(Part);
+      Value := 0;
+      HasDigits := False;
+    end
+    else if (Ch >= '0') and (Ch <= '9') then
+    begin
+      Value := Value * 10 + (Ord(Ch) - Ord('0'));
+      HasDigits := True;
+      Failed := Value > High(Word);
+      if Failed then
+        Break;
+    end
+    else
+    begin
+      Failed := True;
+      Break;
+    end;
+  end;
+  Result := (not Failed) and ((Part = 3) or (Part = 4));
+  if not Result then
+    for I := 0 to High(AVersion) do
+      AVersion[I] := 0;
+end;
+
+function TryDeriveWindowsVersion(const AVersionText: string; out AVersion: TWindowsVersion): Boolean;
+const
+  BUILD_MARKER = '-build.';
+var
+  Text, Core, Rest, Digits: string;
+  I, P: Integer;
+  BuildNumber: Int64;
+begin
+  Text := Trim(AVersionText);
+  if (Text <> '') and ((Text[1] = 'v') or (Text[1] = 'V')) then
+    Delete(Text, 1, 1);
+
+  I := 1;
+  while (I <= Length(Text)) and (Text[I] in ['0'..'9', '.']) do
+    Inc(I);
+  Core := Copy(Text, 1, I - 1);
+  Rest := Copy(Text, I, MaxInt);
+
+  Result := TryParseWindowsVersion(Core, AVersion);
+  if not Result then
+    Exit;
+
+  // A three-part core takes the CI build number ('-build.N') as its fourth part.
+  P := Pos(BUILD_MARKER, LowerCase(Rest));
+  if (P = 1) and (Length(Core) - Length(StringReplace(Core, '.', '', [rfReplaceAll])) = 2) then
+  begin
+    Digits := '';
+    I := P + Length(BUILD_MARKER);
+    while (I <= Length(Rest)) and (Rest[I] in ['0'..'9']) do
+    begin
+      Digits := Digits + Rest[I];
+      Inc(I);
+    end;
+    if (Digits <> '') and (Length(Digits) <= 5) then
+    begin
+      BuildNumber := StrToInt64(Digits);
+      if BuildNumber <= High(Word) then
+        AVersion[3] := Word(BuildNumber);
+    end;
   end;
 end;
 

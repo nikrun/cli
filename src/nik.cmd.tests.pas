@@ -57,6 +57,7 @@ begin
   WriteLn('      --list             List discovered tests without compiling (static scan)');
   WriteLn('      --no-run           Compile the test runner only');
   WriteLn('      --clean            Clean the test build cache (.nik/cache) and force rebuild');
+  WriteLn('      --build-version <V> Use <V> instead of ''version'' from nik.yaml (feeds the generated unit nikmanifest)');
   WriteLn('      --locked           Require nik.lock to be up to date without modifying it');
   WriteLn('      --offline          Use only locally installed SDKs and cached packages');
   WriteLn('  -v, --verbose          Show the compiler invocation and full test output');
@@ -448,7 +449,7 @@ end;
 function ExecuteTestCommand(const AArgs: array of string): Integer;
 var
   I: Integer;
-  Arg, Val, ExplicitProfile, ManifestOverride: string;
+  Arg, Val, ExplicitProfile, ManifestOverride, BuildVersion: string;
   FlagList, FlagNoRun, FlagClean, FlagVerbose, FlagJson, FlagStream, FlagLocked, FlagOffline: Boolean;
   Mode: TTestOutputMode;
   Filters: TStringArray;
@@ -669,6 +670,7 @@ var
 begin
   ExplicitProfile := '';
   ManifestOverride := '';
+  BuildVersion := '';
   FlagList := False;
   FlagNoRun := False;
   FlagClean := False;
@@ -707,6 +709,10 @@ begin
       FlagNoRun := True
     else if Arg = '--clean' then
       FlagClean := True
+    else if Arg = '--build-version' then
+      BuildVersion := NextOptValue(AArgs, I, Arg)
+    else if SplitOptEq(Arg, '--build-version', Val) then
+      BuildVersion := Val
     else if Arg = '--locked' then
       FlagLocked := True
     else if Arg = '--offline' then
@@ -802,6 +808,7 @@ begin
       TargetOpts.EntryOverride := Runner.ProgramPath;
       TargetOpts.ExtraUnitPaths := ExtraDirs;
       TargetOpts.Clean := FlagClean;
+      TargetOpts.BuildVersion := BuildVersion;
       TargetOpts.Locked := FlagLocked;
       TargetOpts.Offline := FlagOffline;
       TargetOpts.AutoInstallSdk := not FlagOffline;

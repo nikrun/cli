@@ -12,6 +12,11 @@ function PrepareCompile(const ASpec: TCompileSpec): TPreparedCompile;
 function ExecuteCompile(const APrepared: TPreparedCompile): TCompileResult;
 function RunCompile(const ASpec: TCompileSpec): TCompileResult;
 
+{ Runs an SDK tool (compiler, fpcres, ...) with the SDK bin directory on PATH and returns its exit code;
+  stdout and stderr are captured in ARawOutput. }
+function ExecuteCompilerProcess(const ACompilerBin, ACompilerBinDir, AWorkDir: string;
+  const AArgs: TStringArray; out ARawOutput: string; out ADurationMs: Int64): Integer;
+
 implementation
 
 uses
