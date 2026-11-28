@@ -21,12 +21,13 @@ program:
     includePaths:
       - vendor/lazarus/components/lazutils
       - vendor/lazarus/components/codetools
-      - .work/generated
-    defines:
-      - NIK_HAS_BUILD_VERSION
-    # -FF: compile res/nik.rc with fpcres (the default windres fails on the aarch64-win64 SDK)
-    fpcArgs:
-      - -FF
+
+  # Icon and file properties of nik.exe. Linked through the generated unit nikmanifest (used by nik.types),
+  # which also provides NIK_VERSION; build.ps1 passes the release tag with --build-version.
+  windows:
+    icon: brand/ico/nikrun.ico
+    info:
+      product: Nikrun CLI
 
   dependencies:
     nikrun-lsp-protocol: ./lsp-protocol

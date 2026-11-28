@@ -1,9 +1,6 @@
 program nik;
 
 {$mode objfpc}{$H+}
-{$IFDEF WINDOWS}
-{$R nik.rc}
-{$ENDIF}
 
 uses
   SysUtils, fpjson,

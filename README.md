@@ -182,7 +182,6 @@ cli/
 │   └── test.ps1
 ├── src/
 │   ├── nik.pas                  # CLI entry point & global argument dispatcher
-│   ├── nik.rc                   # Windows resource script (embeds brand/ico/nikrun.ico into nik.exe)
 │   ├── nik.types.pas            # Domain records, constants & ENikError exception type
 │   ├── nik.term.pas             # Cross-platform ANSI styling, tables & progress output
 │   ├── nik.platform.pas         # Host OS/CPU architecture detection & startup hardening

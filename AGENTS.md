@@ -40,7 +40,7 @@ Before designing new CLI subcommands, flags, manifests, documentation, or archit
 
 ## Build & Verification Commands
 
-Run commands from the repository root (`pwsh` / Windows PowerShell). `build.ps1` compiles the CLI with `nik build`, so a released `nik` must be installed first (found via `-NikPath`, `PATH` or `~/.nikrun/bin`); `nik` installs the Free Pascal SDK pinned in `nik.yaml` itself. A plain `nik build` needs the version include that `build.ps1` generates (`.work/generated/nik_build_version.inc`), so use `build.ps1` for local builds.
+Run commands from the repository root (`pwsh` / Windows PowerShell). The CLI is compiled with `nik` only (`nik build`, also inside `build.ps1`), so a released `nik` that understands the `windows` section of `nik.yaml` must be installed first (found via `-NikPath`, `PATH` or `~/.nikrun/bin`); `nik` installs the Free Pascal SDK pinned in `nik.yaml` itself. The icon and file properties of `nik.exe` come from the `windows` section, the version from the generated unit `nikmanifest` (`NIK_VERSION` in `nik.types`): a plain `nik build` uses `version` from `nik.yaml`, `build.ps1` passes the release tag with `--build-version`.
 
 ```powershell
 # Full build, test & package pipeline (outputs ZIP, release-notes.json & manifest.json to .out/)

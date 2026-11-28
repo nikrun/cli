@@ -395,7 +395,7 @@ try {
             Add-Type -Namespace NikTest -Name IconProbe -MemberDefinition '[System.Runtime.InteropServices.DllImport("shell32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)] public static extern uint ExtractIconEx(string file, int index, System.IntPtr[] large, System.IntPtr[] small, uint count);'
         }
         $embeddedIcons = [NikTest.IconProbe]::ExtractIconEx($NikExe, -1, $null, $null, 0)
-        Assert-True ($embeddedIcons -ge 1) 'nik.exe embeds the Nikrun icon resource (src/nik.rc)'
+        Assert-True ($embeddedIcons -ge 1) 'nik.exe embeds the Nikrun icon resource (windows.icon in nik.yaml)'
     }
 
     $help = Invoke-Nik -NikHome $TestHome -Arguments @('--help')

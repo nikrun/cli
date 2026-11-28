@@ -6,8 +6,9 @@
     Unified build script aligned with the Nikrun/Niksphere CI & Release pipeline:
     - Resolves CleanVersion and VersionTag from version.txt (or -Version).
     - Compiles bin/nik(.exe) with `nik build` (bootstrap nik from -NikPath, PATH or ~/.nikrun/bin; the Free Pascal
-      SDK comes from nik.yaml and is installed by nik on demand) with build-time version injection through the
-      generated include .work/generated/nik_build_version.inc (without modifying tracked sources).
+      SDK comes from nik.yaml and is installed by nik on demand). The version tag is passed with
+      `--build-version` (without modifying tracked sources); the bootstrap nik must understand the `windows`
+      section of nik.yaml, i.e. be a release that contains it.
     - Runs build-lib Pester tests, nikrun-lsp-protocol unit tests, and nik CLI E2E tests when -RunTests is active.
     - Packages nik-<VersionTag>-<targetTriplet>.zip (+ .sha256), release-notes.json, and manifest.json into -OutDir.
     - Supports -ManifestOnly to assemble a unified multi-platform manifest.json from prebuilt CI matrix artifacts.
@@ -75,7 +76,6 @@ if (-not $ManifestOnly) {
     $LspProtocolSrcDir = [System.IO.Path]::Combine($RootDir, 'lsp-protocol', 'src')
     $CodeToolsDir      = [System.IO.Path]::Combine($RootDir, 'vendor', 'lazarus', 'components', 'codetools')
     $BinOutDir         = [System.IO.Path]::Combine($RootDir, 'bin')
-    $GeneratedDir      = [System.IO.Path]::Combine($RootDir, '.work', 'generated')
 
     if (-not (Test-Path $LspProtocolSrcDir)) {
         throw "nikrun-lsp-protocol source directory not found at: $LspProtocolSrcDir"
@@ -90,7 +90,7 @@ if (-not $ManifestOnly) {
         ($env:OS -match 'Windows')
     }
 
-    # src/nik.rc embeds brand/ico/nikrun.ico into Windows builds.
+    # windows.icon in nik.yaml embeds brand/ico/nikrun.ico into Windows builds.
     if ($IsWinHost -and -not (Test-Path $BrandIcoPath)) {
         throw "Nikrun brand icon not found at: $BrandIcoPath (run 'git submodule update --init --depth 1')."
     }
@@ -142,17 +142,7 @@ if (-not $ManifestOnly) {
 
     $ExeExt     = if ($IsWinHost) { '.exe' } else { '' }
     $OutExePath = [System.IO.Path]::Combine($BinOutDir, "nik$ExeExt")
-    New-Item -ItemType Directory -Force -Path $BinOutDir, $GeneratedDir | Out-Null
-
-    # Write the build-time version include (picked up through nik.yaml build.includePaths + NIK_HAS_BUILD_VERSION).
-    # Only rewritten when changed so FPC's include-file tracking keeps incremental .ppu files valid.
-    $EscapedVersionTag = $VersionTag.Replace("'", "''")
-    $VersionIncPath    = [System.IO.Path]::Combine($GeneratedDir, 'nik_build_version.inc')
-    $VersionIncContent = "NIK_VERSION = '$EscapedVersionTag';`n"
-    $ExistingInc       = if (Test-Path $VersionIncPath) { [System.IO.File]::ReadAllText($VersionIncPath) } else { '' }
-    if ($ExistingInc -cne $VersionIncContent) {
-        [System.IO.File]::WriteAllText($VersionIncPath, $VersionIncContent, [System.Text.UTF8Encoding]::new($false))
-    }
+    New-Item -ItemType Directory -Force -Path $BinOutDir | Out-Null
 
     $BootstrapNik = Resolve-BootstrapNik -ExplicitPath $NikPath
     if ([string]::Equals([System.IO.Path]::GetFullPath($BootstrapNik), [System.IO.Path]::GetFullPath($OutExePath), [System.StringComparison]::OrdinalIgnoreCase)) {
@@ -165,7 +155,10 @@ if (-not $ManifestOnly) {
     }
 
     Write-Host "  -> Compiling nik with bootstrap $BootstrapNik ..."
-    $nikBuildArgs = @('--no-color', '--nikrun-home', $EffectiveNikHome, 'build', '-p', $Profile, '--json')
+    # The version tag reaches the binary through the generated unit nikmanifest (nik.types: NIK_VERSION) and the
+    # Windows VERSIONINFO; nik.yaml itself stays untouched.
+    $nikBuildArgs = @('--no-color', '--nikrun-home', $EffectiveNikHome, 'build', '-p', $Profile,
+        '--build-version', $VersionTag, '--json')
     if ($Clean) {
         $nikBuildArgs += '--clean'
     }
